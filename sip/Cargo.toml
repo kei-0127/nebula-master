@@ -1,0 +1,35 @@
+[package]
+name = "sip"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+reqwest = { version = "0.11.0", features = ["json"] }
+async-channel = "1.6.1"
+tracing = "0.1.40"
+jsonrpc-lite = "0.5.0"
+serde_json = "1.0.61"
+url = "2.2.0"
+lazy_static = "1.4.0"
+futures = "0.3.8"
+futures-util = "0.3.8"
+tokio-tungstenite = "0.13.0"
+tokio-rustls = "0.23.1"
+rustls-pemfile = "0.2.1"
+webpki-roots = "0.22.1"
+thiserror = "1.0.22"
+anyhow = "1.0.34"
+strum = "0.22.0"
+strum_macros = "0.22.0"
+indexmap = { version = "1.6.0", features = ["serde-1"]}
+regex = "1.4.2"
+rust-crypto = "0.2.36"
+rand = "0.7.3"
+tokio = { version = "1.0.1", features = ["full"]}
+serde = { version = "1.0.117", features = ["derive"] }
+uuid = { version = "0.8.1", features = ["v4", "v5"] }
+async-trait = "0.1.42"
+nebula_task = {path = "../task"}
+nebula_redis = {path = "../redis"}
+nebula_utils = {path = "../utils"}

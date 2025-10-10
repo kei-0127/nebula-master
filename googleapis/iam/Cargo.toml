@@ -1,0 +1,9 @@
+[package]
+name = "google_iam"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+prost = "0.7.0"
+google_type = { path = "../type" }

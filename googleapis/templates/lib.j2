@@ -1,0 +1,56 @@
+use failure::Error;
+use serde::{Deserialize, Serialize};
+
+{% for schema_name, schema in schemas %}
+    {% if schema.type == "object" %}
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+    pub struct {{ schema_name }} {
+        {% for property_name, property in schema.properties %}
+           pub {{ property_name }}:
+            {% if property["$ref"] %}
+                {{property["$ref"]}}
+            {% elif property["type"] and property["type"] == "array" %}
+                {% if property["items"]["type"] and property["items"]["type"] == "string" %}
+                    Vec<String>
+                {% elif property["items"]["$ref"] %}
+                    {{property["items"]["$ref"]}}
+                {% else %}
+                    String
+                {% endif %}
+            {% elif property["type"] and property["type"] == "number" and property["format"] == "double" %}
+                f64
+            {% elif property["type"] and property["type"] == "integer" and property["format"] == "int32" %}
+                i32
+            {% else %}
+                String
+            {% endif %},
+        {% endfor %}
+    }
+    {% endif %}
+{% endfor %}
+
+{% for name, resource in resources %}
+    pub struct {{ name | capitalize }}{
+
+    }
+
+    {% if resource.methods %}
+    impl {{ name | capitalize }} {
+    {% for method_name, method in resource.methods %}
+    pub async fn {{ method_name }}({% if method.request %}request:{{ method.request["$ref"] }}{% endif %}) {% if method.response %} -> Result<{{method.response["$ref"]}}, Error> {% endif %} {
+        let res {% if method.response %} : {{method.response["$ref"]}} {% endif %}= reqwest::Client::new()
+.post("{{rootUrl}}{{method.path}}")
+ {% if method.request %}
+            .json(&request)
+ {% endif %}           
+            .send().await?
+ {% if method.response %}
+ .json().await?;
+ {% endif %}           
+
+      Ok({% if method.response %} res {% endif %})
+    }
+    {% endfor %}
+    }
+    {% endif %}
+{% endfor %}

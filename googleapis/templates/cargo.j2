@@ -1,0 +1,10 @@
+[package]
+name = "{{name}}{{version}}"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0.30"
+serde = { version = "1.0.90", features = ["derive"] }
+reqwest = { version = "0.10.1", features = ["json"] }

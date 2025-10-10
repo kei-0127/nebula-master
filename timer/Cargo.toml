@@ -1,0 +1,9 @@
+[package]
+name = "nebula_timer"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+libc = "0.2.91"
+tokio = { version = "1.0.1", features = ["full"]}

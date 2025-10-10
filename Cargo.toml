@@ -1,0 +1,51 @@
+[package]
+name = "nebula"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[[bin]]
+name = "nebula-proxy"
+
+[[bin]]
+name = "nebula-switchboard"
+
+[[bin]]
+name = "nebula-media"
+
+[dependencies]
+console-subscriber = "0.1.8"
+anyhow = "1.0.30"
+tokio = { version = "1.11.0", features = ["macros"]}
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-appender = "0.2.3"
+nebula_log = {path = "./log"}
+nebula_proxy = {path = "./proxy"}
+nebula_switchboard = {path = "./switchboard"}
+nebula_media = {path = "./media"}
+
+[workspace]
+members = [
+   "rpc", 
+   "db",
+   "proxy",
+   "sip",
+   "switchboard",
+   "media",
+   "yaypi",
+   "googleapis",
+   "spandsp-sys",
+   "lame",
+   "redis",
+   "codec",
+   "opus-sys",
+   "task",
+   "log",
+   "timer",
+   "sdp",
+   "utils",
+]
+
+[workspace.dependencies]
+phonenumber = { git = "https://github.com/yay-com/rust-phonenumber", rev = "b149e764b4d4e1300cbacb8f618047fcff84d69a" }

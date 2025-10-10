@@ -1,0 +1,26 @@
+[package]
+name = "codec"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+libm = "0.2.7"
+byteorder = "1.4.3"
+tracing = "0.1.40"
+serde = { version = "1.0.133", features = ["derive"] }
+base64 = "0.13.0"
+futures = { version = "0.3.19", features = ["executor"] }
+async-channel = "1.6.1"
+parking_lot = "0.11.1"
+lazy_static = "1.4.0"
+dashmap = "5.5.3"
+rand = "0.8.3"
+anyhow = "1.0.34"
+libc = "0.2.80"
+ffmpeg-next = "7.1.0"
+itertools = "0.14.0"
+opus-sys = { path = "../opus-sys" }
+spandsp-sys = { path = "../spandsp-sys" }
+nebula_utils = {path = "../utils"}
+nebula_redis = {path = "../redis"}

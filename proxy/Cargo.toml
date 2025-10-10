@@ -1,0 +1,37 @@
+[package]
+name = "nebula_proxy"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+jwt = "0.15.0"
+axum = "0.4.7"
+tower-http = { version = "0.3", features = ["trace"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3" }
+strum = "0.20.0"
+strum_macros = "0.20.1"
+jsonrpc-lite = "0.5.0"
+fern = "0.6.0"
+chrono = "0.4.19"
+reqwest = { version = "0.11.0", features = ["json"] }
+phonenumber = { git = "https://github.com/yay-com/rust-phonenumber", rev = "b149e764b4d4e1300cbacb8f618047fcff84d69a" }
+tide = "0.16.0"
+toml = "0.5.7"
+thiserror = "1.0.22"
+anyhow = "1.0.34"
+lazy_static = "1.4.0"
+futures = "0.3.8"
+serde = { version = "1.0.117", features = ["derive"] }
+serde_json = "1.0.59"
+scopeguard = "1.1.0"
+itertools = "0.9.0"
+rand = "0.7.3"
+tokio = { version = "1.0.1", features = ["full"]}
+nebula_rpc = {path = "../rpc"}
+nebula_db = {path = "../db"}
+nebula_redis = {path = "../redis"}
+nebula_utils = {path = "../utils"}
+sip = {path = "../sip"}
+sdp = {path = "../sdp"}

@@ -1,0 +1,10 @@
+[package]
+name = "nebula_utils"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+rust-crypto = "0.2.36"
+rand = "0.7.3"
+uuid = { version = "0.8.1", features = ["v4", "v5"] }

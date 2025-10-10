@@ -1,0 +1,8 @@
+[package]
+name = "google_type"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+prost = "0.7.0"

@@ -1,0 +1,21 @@
+[package]
+name = "sdp"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+openssl = "0.10.32"
+openssl-sys = "0.9.60"
+base64 = "0.13.0"
+strum = "0.20.0"
+strum_macros = "0.20.1"
+anyhow = "1.0.34"
+thiserror = "1.0.22"
+rand = "0.7.3"
+uuid = { version = "0.8.1", features = ["v4", "v5"] }
+serde = { version = "1.0.117", features = ["derive"] }
+codec = { path = "../codec"}
+nebula_utils = {path = "../utils"}
+nebula_redis = {path = "../redis"}
+nebula_task = {path = "../task"}

@@ -1,0 +1,785 @@
+use std::{collections::HashSet, str::FromStr, time::Duration};
+
+use chrono::{DateTime, Datelike, Month, NaiveTime, Timelike, Weekday};
+use chrono_tz::Tz;
+use itertools::Itertools;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct AuxRecord {
+    pub time: String,
+    pub code: String,
+}
+
+pub fn time_range_of_the_day(
+    time: &DateTime<Tz>,
+    time_str: &str,
+) -> Option<(DateTime<Tz>, DateTime<Tz>)> {
+    let parts: Vec<&str> = time_str.split(',').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let year = if parts.len() == 5 {
+        check_formatted_time(time, parts[4], "year")?
+    } else {
+        true
+    };
+
+    if check_formatted_time(time, parts[1], "weekday")?
+        && check_formatted_time(time, parts[2], "day")?
+        && check_formatted_time(time, parts[3], "month")?
+        && year
+    {
+        let time_str = parts[0];
+        let parts: Vec<&str> = time_str.split('-').collect();
+        if time_str == "*" {
+            return Some((beginning_of_day(time)?, end_of_day(time)?));
+        } else if parts.len() == 1 {
+            let naive_time = NaiveTime::parse_from_str(parts[0], "%H:%M").ok()?;
+            let start = time
+                .with_hour(naive_time.hour())?
+                .with_minute(naive_time.minute())?
+                .with_second(0)?
+                .with_nanosecond(0)?;
+            let end = start.checked_add_signed(
+                chrono::Duration::from_std(Duration::from_secs(60)).ok()?,
+            )?;
+            return Some((start, end));
+        } else if parts.len() == 2 {
+            let start = NaiveTime::parse_from_str(parts[0], "%H:%M").ok()?;
+            let end = NaiveTime::parse_from_str(parts[1], "%H:%M").ok()?;
+            let start = time
+                .with_hour(start.hour())?
+                .with_minute(start.minute())?
+                .with_second(0)?
+                .with_nanosecond(0)?;
+            let end = time
+                .with_hour(end.hour())?
+                .with_minute(end.minute())?
+                .with_second(0)?
+                .with_nanosecond(0)?;
+            return Some((start, end));
+        }
+    }
+
+    None
+}
+
+fn beginning_of_day(time: &DateTime<Tz>) -> Option<DateTime<Tz>> {
+    time.with_hour(0)?
+        .with_minute(0)?
+        .with_second(0)?
+        .with_nanosecond(0)
+}
+
+fn end_of_day(time: &DateTime<Tz>) -> Option<DateTime<Tz>> {
+    time.with_hour(0)?
+        .with_minute(0)?
+        .with_second(0)?
+        .with_nanosecond(0)?
+        .checked_add_signed(
+            chrono::Duration::from_std(Duration::from_secs(86400)).ok()?,
+        )
+}
+
+pub fn format_aux_records(
+    time: &DateTime<Tz>,
+    records: &[AuxRecord],
+) -> Vec<(DateTime<Tz>, String)> {
+    let mut times = HashSet::new();
+    if let Some(t) = beginning_of_day(time) {
+        times.insert(t);
+    }
+    if let Some(t) = end_of_day(time) {
+        times.insert(t);
+    }
+
+    let records = records
+        .iter()
+        .filter_map(|record| {
+            let range = time_range_of_the_day(time, &record.time)?;
+            times.insert(range.0);
+            times.insert(range.1);
+            Some((range, &record.code))
+        })
+        .sorted_by_key(|((start, end), _)| {
+            if start <= end {
+                (*start, *end)
+            } else {
+                (
+                    beginning_of_day(start).unwrap_or(*end),
+                    beginning_of_day(start).unwrap_or(*start),
+                )
+            }
+        })
+        .rev()
+        .collect::<Vec<_>>();
+
+    let check_code = |time: &DateTime<Tz>| {
+        for ((start, end), code) in &records {
+            if start <= end {
+                if start <= time && time < end {
+                    return Some(code);
+                }
+            } else if !(end <= time && time < start) && time.date() == start.date() {
+                return Some(code);
+            }
+        }
+        None
+    };
+
+    let times = times.into_iter().sorted().collect::<Vec<_>>();
+
+    times
+        .into_iter()
+        .map(|time| {
+            let code = check_code(&time);
+            (
+                time,
+                code.map(|s| s.to_string())
+                    .unwrap_or_else(|| "available".to_string()),
+            )
+        })
+        .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::DateTime;
+    use chrono_tz::UTC;
+
+    use crate::aux::{beginning_of_day, end_of_day, format_aux_records};
+
+    use super::{time_range_of_the_day, AuxRecord};
+
+    #[test]
+    fn test_time_range_of_the_day() {
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+        let time_str = "16:00,*,*,*,*";
+        let range = time_range_of_the_day(&time, time_str);
+        assert_eq!(
+            range,
+            Some((
+                DateTime::parse_from_rfc3339("2023-11-20T16:00:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+                DateTime::parse_from_rfc3339("2023-11-20T16:01:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+            ))
+        );
+
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+        let time_str = "09:00-16:00,*,*,*,*";
+        let range = time_range_of_the_day(&time, time_str);
+        assert_eq!(
+            range,
+            Some((
+                DateTime::parse_from_rfc3339("2023-11-20T09:00:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+                DateTime::parse_from_rfc3339("2023-11-20T16:00:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+            ))
+        );
+
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+        let time_str = "16:00-09:00,*,*,*,*";
+        let range = time_range_of_the_day(&time, time_str);
+        assert_eq!(
+            range,
+            Some((
+                DateTime::parse_from_rfc3339("2023-11-20T16:00:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+                DateTime::parse_from_rfc3339("2023-11-20T09:00:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+            ))
+        );
+
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+        let time_str = "*,*,*,*,*";
+        let range = time_range_of_the_day(&time, time_str);
+        assert_eq!(
+            range,
+            Some((
+                DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+                DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                    .unwrap()
+                    .with_timezone(&UTC),
+            ))
+        );
+    }
+
+    #[test]
+    fn test_beginning_of_day() {
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+        assert_eq!(
+            DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00").unwrap(),
+            beginning_of_day(&time).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_end_of_day() {
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+        assert_eq!(
+            DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00").unwrap(),
+            end_of_day(&time).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_format_aux_records() {
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+
+        let records = &[
+            AuxRecord {
+                time: "09:00-10:00,*,*,*,*".to_string(),
+                code: "breakfirst".to_string(),
+            },
+            AuxRecord {
+                time: "12:00-13:00,*,*,*,*".to_string(),
+                code: "lunch".to_string(),
+            },
+            AuxRecord {
+                time: "15:00-16:00,*,*,*,*".to_string(),
+                code: "tea".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_aux_records(&time, records),
+            vec![
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T09:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "breakfirst".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T10:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T12:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "lunch".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T13:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T15:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "tea".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T16:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_format_aux_records_reverse_time_range() {
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+
+        let records = &[AuxRecord {
+            time: "18:00-09:00,*,*,*,*".to_string(),
+            code: "off".to_string(),
+        }];
+
+        assert_eq!(
+            format_aux_records(&time, records),
+            vec![
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "off".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T09:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T18:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "off".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_format_aux_records_complex() {
+        let time =
+            DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+        let time = time.with_timezone(&UTC);
+
+        let records = &[
+            AuxRecord {
+                time: "18:00-09:00,*,*,*,*".to_string(),
+                code: "off".to_string(),
+            },
+            AuxRecord {
+                time: "12:00-13:00,*,*,*,*".to_string(),
+                code: "lunch".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_aux_records(&time, records),
+            vec![
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "off".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T09:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T12:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "lunch".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T13:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-20T18:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "off".to_string(),
+                ),
+                (
+                    DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                        .unwrap()
+                        .with_timezone(&UTC),
+                    "available".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_format_aux_records_overlapping_time_range() {
+        {
+            let time =
+                DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+            let time = time.with_timezone(&UTC);
+
+            let records = &[
+                AuxRecord {
+                    time: "18:00-09:00,*,*,*,*".to_string(),
+                    code: "off".to_string(),
+                },
+                AuxRecord {
+                    time: "17:00-18:00,*,*,*,*".to_string(),
+                    code: "tea".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                format_aux_records(&time, records),
+                vec![
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "off".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T09:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T17:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "tea".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T18:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "off".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                ]
+            );
+        }
+
+        {
+            let time =
+                DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+            let time = time.with_timezone(&UTC);
+
+            let records = &[
+                AuxRecord {
+                    time: "16:00-17:00,*,*,*,*".to_string(),
+                    code: "lunch".to_string(),
+                },
+                AuxRecord {
+                    time: "17:00-18:00,*,*,*,*".to_string(),
+                    code: "tea".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                format_aux_records(&time, records),
+                vec![
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T16:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "lunch".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T17:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "tea".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T18:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                ]
+            );
+        }
+
+        {
+            let time =
+                DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+            let time = time.with_timezone(&UTC);
+
+            let records = &[
+                AuxRecord {
+                    time: "12:00-17:00,*,*,*,*".to_string(),
+                    code: "lunch".to_string(),
+                },
+                AuxRecord {
+                    time: "15:00-16:00,*,*,*,*".to_string(),
+                    code: "tea".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                format_aux_records(&time, records),
+                vec![
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T12:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "lunch".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T15:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "tea".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T16:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "lunch".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T17:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                ]
+            );
+        }
+
+        {
+            let time =
+                DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+            let time = time.with_timezone(&UTC);
+
+            let records = &[
+                AuxRecord {
+                    time: "12:00-17:00,*,*,*,*".to_string(),
+                    code: "lunch".to_string(),
+                },
+                AuxRecord {
+                    time: "15:00-18:00,*,*,*,*".to_string(),
+                    code: "tea".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                format_aux_records(&time, records),
+                vec![
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T12:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "lunch".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T15:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "tea".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T17:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "tea".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T18:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                ]
+            );
+        }
+
+        {
+            let time =
+                DateTime::parse_from_rfc3339("2023-11-20T16:39:57+00:00").unwrap();
+            let time = time.with_timezone(&UTC);
+
+            let records = &[
+                AuxRecord {
+                    time: "18:00-09:00,*,*,*,*".to_string(),
+                    code: "off".to_string(),
+                },
+                AuxRecord {
+                    time: "06:00-07:00,*,*,*,*".to_string(),
+                    code: "maintain".to_string(),
+                },
+                AuxRecord {
+                    time: "08:00-10:00,*,*,*,*".to_string(),
+                    code: "breakfirst".to_string(),
+                },
+                AuxRecord {
+                    time: "19:00-20:00,*,*,*,*".to_string(),
+                    code: "fix".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                format_aux_records(&time, records),
+                vec![
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "off".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T06:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "maintain".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T07:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "off".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T08:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "breakfirst".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T09:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "breakfirst".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T10:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T18:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "off".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T19:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "fix".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-20T20:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "off".to_string(),
+                    ),
+                    (
+                        DateTime::parse_from_rfc3339("2023-11-21T00:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&UTC),
+                        "available".to_string(),
+                    ),
+                ]
+            );
+        }
+    }
+}
+
+pub fn check_formatted_time(
+    time: &DateTime<Tz>,
+    time_str: &str,
+    format: &str,
+) -> Option<bool> {
+    if time_str == "*" {
+        return Some(true);
+    }
+    match format {
+        "day" => Some(time.date().day() == time_str.parse::<u32>().ok()?),
+        "month" => Some(
+            time.date().month()
+                == Month::from_str(time_str).ok()?.number_from_month(),
+        ),
+        "weekday" => {
+            Some(time.date().weekday() == Weekday::from_str(time_str).ok()?)
+        }
+        "year" => Some(time.date().year() == time_str.parse::<i32>().ok()?),
+        "time_range" => {
+            let time = time.time();
+            let current_time_str =
+                format!("{:0>2}:{:0>2}", time.hour(), time.minute());
+            let time = NaiveTime::parse_from_str(&current_time_str, "%H:%M").ok()?;
+            let parts: Vec<&str> = time_str.split("-").collect();
+            if parts.len() == 1 {
+                Some(time_str == &current_time_str)
+            } else if parts.len() == 2 {
+                let start = NaiveTime::parse_from_str(parts[0], "%H:%M").ok()?;
+                let end = NaiveTime::parse_from_str(parts[1], "%H:%M").ok()?;
+                if start <= end {
+                    Some(start <= time && time <= end)
+                } else {
+                    Some(!(end < time && time < start))
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}

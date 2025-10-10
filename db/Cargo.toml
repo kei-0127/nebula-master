@@ -1,0 +1,32 @@
+[package]
+name = "nebula_db"
+version = "0.1.0"
+authors = ["Dongdong Zhou <dz@yay.com>"]
+edition = "2018"
+
+[dependencies]
+phonenumber.workspace = true
+sha2 = "0.9.8"
+hmac = "0.11.0"
+strum = "0.20.0"
+strum_macros = "0.20.1"
+itertools = "0.10.0"
+reqwest = "0.11.0"
+tokio-postgres = "0.7.0"
+tokio = { version = "1.0.1", features = ["full"] }
+chrono = "0.4.19"
+chrono-tz = "0.5.3"
+uuid = { version = "0.8.2", features = ["serde"] }
+futures = "0.3.15"
+toml = "0.5.7"
+lazy_static = "1.4.0"
+anyhow = "1.0.34"
+bigdecimal = { version = "0.1.2", features = ["serde"] }
+diesel = { git = "https://github.com/yay-com/diesel", branch = "1.4.x", features = ["r2d2", "postgres", "uuidv07", "chrono", "64-column-tables", "numeric", "bigdecimal"]}
+serde = { version = "1.0.133", features = ["derive"] }
+serde_json = "1.0.59"
+nebula_task = {path = "../task"}
+nebula_redis = {path = "../redis"}
+nebula_utils = {path = "../utils"}
+sdp = {path = "../sdp"}
+sip = {path = "../sip"}
