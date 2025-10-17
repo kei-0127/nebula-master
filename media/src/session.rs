@@ -1,3 +1,25 @@
+// Media Session Management
+// 
+// This module provides media session management capabilities including
+// session creation, certificate management, audio mixing, and session
+// lifecycle management for WebRTC connections.
+// 
+// Key Features
+// 
+// - **Session Management**: Create, manage, and terminate media sessions
+// - **Certificate Generation**: Generate X.509 certificates for DTLS
+// - **Audio Mixing**: Mix multiple audio streams for conferences
+// - **Port Management**: Allocate and manage network ports
+// - **Session State**: Track session state and metadata
+// 
+// Session Components
+// 
+// - **Certificate**: X.509 certificate for DTLS
+// - **NewSession**: Session creation and initialization
+// - **Audio Mixing**: Real-time audio stream mixing
+// - **Port Allocation**: Network port management
+// 
+
 use super::server::MEDIA_SERVICE;
 use crate::socket::RawSocket;
 use crate::stream::{
@@ -26,28 +48,50 @@ use tokio::sync::mpsc::{
 };
 use tokio::{self, time::Duration};
 
-const THRESHOLD: f64 = 0.6;
-const ACTUAL_THRESHOLD: f64 = THRESHOLD * 0x7fff as f64;
-const ALPHA: f64 = 7.48338;
+// Audio processing constants
+const THRESHOLD: f64 = 0.6;                    // Silence detection threshold
+const ACTUAL_THRESHOLD: f64 = THRESHOLD * 0x7fff as f64;  // Convert to 16-bit range
+const ALPHA: f64 = 7.48338;                    // Audio processing coefficient
 
+/// Error types for session operations
 #[derive(Debug, Error)]
 pub enum SessionError {
     #[error("no available port")]
-    NoPort,
+    NoPort,        // No available network port
 
     #[error("no sample rate")]
-    NoSampleRate,
+    NoSampleRate,  // Audio sample rate not specified
 }
 
+/// X.509 certificate for DTLS security
+/// 
+/// This struct represents a self-signed X.509 certificate used for
+/// DTLS handshake in WebRTC connections. It includes the certificate
+/// fingerprint for verification.
 pub struct Certificate {
-    pub fingerprint: String,
-    pub x509cert: X509,
-    pub private_key: PKey<Private>,
+    pub fingerprint: String,      // Certificate fingerprint for verification
+    pub x509cert: X509,           // X.509 certificate
+    pub private_key: PKey<Private>,  // Private key for signing
 }
 
+/// New media session creation
+/// 
+/// This struct handles the creation and initialization of new media
+/// sessions, including port allocation and session setup.
 pub struct NewSession {}
 
 impl NewSession {
+    /// Session entrypoint for a newly observed 5-tuple (port/ip:port).
+    ///
+    /// When a packet for `port` arrives, we resolve its channel from Redis,
+    /// derive a stable stream `Uuid` using `uuid_v5(channel:port)`, start a
+    /// Redis heartbeat (`nebula:session:{port}`), and then hand off the
+    /// packet/RPC loop to `MediaStreamReceiver::process_packets`.
+    ///
+    /// `MediaStreamReceiver::process_packets` performs end-to-end RTP/RTCP
+    /// handling for audio/video (SRTP decrypt, DTMF, TCC/NACK feedback,
+    /// forwarding, recording, RPC control). This method only prepares the
+    /// identity/context and defers the stream logic to that module.
     pub async fn process_packets(
         port: u16,
         peer_ip: Ipv4Addr,
@@ -89,6 +133,7 @@ impl NewSession {
 
 #[derive(Clone, Debug)]
 pub enum SessionPoolMessage {
+    /// A raw UDP payload received on `port` from (`peer_ip`,`peer_port`) at `now`.
     Packet {
         port: u16,
         peer_ip: Ipv4Addr,
@@ -96,15 +141,22 @@ pub enum SessionPoolMessage {
         packet: Vec<u8>,
         now: Instant,
     },
+    /// Indicates a session has finished; remove its sender from the pool.
     Stop(String),
 }
 
+/// Manages per-5-tuple session workers and their channels.
+///
+/// Listens for incoming packets, creates a per-session channel on first
+/// packet, and spawns `NewSession::process_packets` to handle it. Also
+/// tracks and cleans up finished sessions.
 pub struct NewSessionPool {
     sessions: HashMap<String, UnboundedSender<StreamReceiverMessage>>,
     stream_sender_pool: UnboundedSender<StreamSenderPoolMessage>,
 }
 
 impl NewSessionPool {
+    /// Create a new session pool bound to the shared `StreamSenderPool`.
     pub async fn new(
         stream_sender_pool: UnboundedSender<StreamSenderPoolMessage>,
     ) -> Self {
@@ -114,6 +166,11 @@ impl NewSessionPool {
         }
     }
 
+    /// Per-port UDP listener.
+    ///
+    /// Binds `UdpSocket` on `MEDIA_SERVICE.config.media_ip:port`, then forwards
+    /// each received datagram to the pool via `SessionPoolMessage::Packet`.
+    /// Shuts down after ~30s of inactivity (or on socket error).
     async fn listen_port(
         port: u16,
         mut rx: Receiver<()>,
@@ -159,6 +216,16 @@ impl NewSessionPool {
         }
     }
 
+    /// Main loop for the session pool.
+    ///
+    /// Uses a raw UDP socket (`RawSocket::new(true)`) to sniff incoming UDP
+    /// traffic to the local media IP. When a destination port in [10000,40000]
+    /// is observed, lazily starts a per-port `UdpSocket` listener by spawning
+    /// `listen_port`. Each datagram becomes a `SessionPoolMessage::Packet`.
+    ///
+    /// For each unique (port, peer_ip, peer_port) tuple, this creates a
+    /// per-session channel and spawns `NewSession::process_packets`. When the
+    /// session finishes, a `Stop(session_id)` message removes it from the map.
     pub async fn run(&mut self) {
         let (session_pool_sender, mut session_pool_receiver) = unbounded_channel();
 
@@ -273,6 +340,12 @@ impl NewSessionPool {
     }
 }
 
+/// Get the DTLS certificate fingerprint, generating and caching the
+/// certificate if absent.
+///
+/// Reads `nebula:dtls:cert.fingerprint` from Redis; if missing, calls
+/// `get_cert()` to create and persist a new self-signed cert, then returns
+/// its SHA-256 fingerprint in colon-separated hex.
 pub async fn get_cert_fingerprint() -> Result<String> {
     let fingerprint = REDIS
         .hget("nebula:dtls:cert", "fingerprint")
@@ -286,6 +359,10 @@ pub async fn get_cert_fingerprint() -> Result<String> {
     }
 }
 
+/// Load the DTLS certificate from Redis, if present.
+///
+/// Expects `crt`, `key`, and `fingerprint` fields under `nebula:dtls:cert`.
+/// Returns `None` if any field is missing or parsing fails.
 async fn get_cert_from_cache() -> Option<Certificate> {
     let cert_map: HashMap<String, String> =
         REDIS.hgetall("nebula:dtls:cert").await.ok()?;
@@ -302,6 +379,13 @@ async fn get_cert_from_cache() -> Option<Certificate> {
     })
 }
 
+/// Get or create the DTLS certificate and store it in Redis.
+///
+/// Uses a distributed mutex to avoid races across processes. If cached cert
+/// is found (`get_cert_from_cache`), returns it; otherwise generates a new
+/// 2048-bit RSA self-signed X.509 certificate (`gen_cert`), stores `crt`,
+/// `key`, and `fingerprint` in `nebula:dtls:cert` with a long TTL, and
+/// returns it.
 pub async fn get_cert() -> Result<Certificate> {
     let mutex = DistributedMutex::new("nebula:dtls:cert:lock".to_string());
     mutex.lock().await;
@@ -329,6 +413,10 @@ pub async fn get_cert() -> Result<Certificate> {
     Ok(cert)
 }
 
+/// Generate a new 2048-bit RSA self-signed X.509 certificate for DTLS.
+///
+/// Sets CN=nebula, 1-year validity, version 0, and computes the SHA-256
+/// fingerprint as colon-separated hex (e.g., `AA:BB:...`).
 fn gen_cert() -> Result<Certificate> {
     let rsa = Rsa::generate(2048)?;
     let pkey = PKey::from_rsa(rsa)?;
@@ -380,6 +468,10 @@ pub enum SessionDirection {
     Receive,
 }
 
+/// Mix two 16-bit PCM samples with soft clipping.
+///
+/// Adds samples in `f64`, applies a soft-knee limiter around
+/// `ACTUAL_THRESHOLD`, then converts back to `i16`.
 pub fn mix(x: i16, y: i16) -> i16 {
     let buf = x as f64 + y as f64;
     (if buf > ACTUAL_THRESHOLD {
@@ -391,6 +483,7 @@ pub fn mix(x: i16, y: i16) -> i16 {
     }) as i16
 }
 
+/// Soft-knee normalization curve used by `mix` for limiter response.
 fn mix_normalization(x: f64) -> f64 {
     let a = (1.0 - THRESHOLD) / (1.0 + ALPHA).ln();
     let b = ALPHA / (2.0 - THRESHOLD);

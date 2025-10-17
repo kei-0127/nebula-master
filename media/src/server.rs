@@ -75,6 +75,12 @@ pub struct Server {
 }
 
 impl MediaService {
+    /// Construct the global media service.
+    ///
+    /// Loads `Config` from disk, initializes RPC clients (media and switchboard),
+    /// resolves the local IP, opens the database handle, and creates a storage
+    /// client. This is used by runtime components across the process via
+    /// `MEDIA_SERVICE`.
     pub fn new() -> Result<MediaService> {
         let config = Config::new()?;
 
@@ -96,6 +102,12 @@ impl MediaService {
         })
     }
 
+    /// Process an incoming RPC destined for media.
+    ///
+    /// - If the method is `StopIce`, emits a `PeerConnectionEvent::Stop`.
+    /// - Otherwise, if `rpc_msg.id` parses as a `Uuid`, forwards the message to
+    ///   the `StreamSenderPool` so the per-stream sender can handle it.
+    /// - If the channel is closed or ID is invalid, returns `Ok(())` without error.
     pub async fn process_rpc(
         rpc_msg: RpcMessage,
         sender: &UnboundedSender<StreamSenderPoolMessage>,
@@ -125,6 +137,7 @@ impl MediaService {
 }
 
 impl Config {
+    /// Load media configuration from `/etc/nebula/nebula.conf`.
     pub fn new() -> Result<Config> {
         // Read configuration from file
         let contents = fs::read_to_string("/etc/nebula/nebula.conf")?;
@@ -133,6 +146,7 @@ impl Config {
 }
 
 impl Server {
+    /// Create a new media server instance and initialize transport.
     pub async fn new() -> Result<Server, Error> {
         // Initialize transport layer
         let transport = Transport::new().await?;
@@ -140,6 +154,12 @@ impl Server {
         Ok(Server { transport })
     }
 
+    /// Start the HTTP control endpoints and run the transport loop.
+    ///
+    /// Spawns an Axum server exposing `/health-check` and
+    /// `/internal/stream` (for internal RPC forwarding), then runs the
+    /// underlying `Transport` which handles UDP sockets and the stream sender
+    /// pool.
     pub async fn run(&mut self) {
         info!("media server run");
         async fn health_check() -> &'static str {
