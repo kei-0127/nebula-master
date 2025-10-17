@@ -1,3 +1,36 @@
+//! # Audio Processing and Sound Management
+//! 
+//! This module provides comprehensive audio processing capabilities including
+//! sound file handling, audio effects, mixing, recording, and playback.
+//! It supports various audio formats and provides real-time audio processing.
+//! 
+//! ## Key Features
+//! 
+//! - **Sound File Support**: WAV, MP3, and other audio formats
+//! - **Audio Effects**: Noise suppression, echo cancellation, audio mixing
+//! - **Recording**: Real-time call recording with multiple formats
+//! - **Playback**: Audio playback with volume control and effects
+//! - **Text-to-Speech**: Integration with Google Text-to-Speech
+//! - **Audio Generation**: Tone generation and audio synthesis
+//! 
+//! ## Audio Processing Pipeline
+//! 
+//! 1. **Input**: Audio samples from microphone or file
+//! 2. **Processing**: Apply effects, mixing, resampling
+//! 3. **Output**: Send to speakers or save to file
+//! 
+//! ## Usage
+//! 
+//! ```rust
+//! use nebula_media::sound::{SessionSound, SoundFile};
+//! 
+//! // Create session sound
+//! let sound = SessionSound::new(id, channel_id, sounds, random, repeat, block);
+//! 
+//! // Load sound file
+//! let file = SoundFile::new("path/to/audio.wav");
+//! ```
+
 use crate::session::mix;
 
 use super::resampler::Resampler;
@@ -19,28 +52,40 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, BufReader};
 use tracing::error;
 use tracing::info;
-// use tokio::prelude::*;
 use async_channel::{self, Receiver};
 
+/// Error types for sound file operations
 #[derive(Debug, Error)]
 pub enum SoundFileError {
     #[error("invalid file")]
     InvalidFile,
 }
 
+/// Session-level audio management
+/// 
+/// This struct manages audio playback for a specific session, including
+/// sound file playback, random selection, and blocking behavior.
 pub struct SessionSound {
-    pub id: String,
-    pub channel_id: String,
-    pub block: bool,
-    pub random: bool,
-    pub receiver: Receiver<Vec<i16>>,
+    pub id: String,                    // Unique sound identifier
+    pub channel_id: String,            // Associated channel ID
+    pub block: bool,                   // Whether to block other audio
+    pub random: bool,                   // Random sound selection
+    pub receiver: Receiver<Vec<i16>>,  // Audio data receiver
 }
 
+/// Sound file representation
+/// 
+/// This struct represents an audio file and provides methods for
+/// loading, processing, and playing audio content.
 pub struct SoundFile {
-    path: String,
+    path: String,  // File path to audio content
 }
 
 impl SessionSound {
+    /// Spawn a session sound producer.
+    ///
+    /// Selects files (optionally shuffled), repeats up to `repeat` times (or once if 0),
+    /// emits PCM frames of `ptime` at `sample_rate`, and optionally blocks other audio.
     pub fn new(
         id: String,
         channel_id: String,
@@ -106,6 +151,10 @@ impl SessionSound {
         }
     }
 
+    /// Resolve a sound source string to a `SoundFile`.
+    ///
+    /// Supports schemes: `tts://`, `file://`, `vm://`, `tone://`, `redis://`,
+    /// `record_file://`, or a database-backed name.
     async fn get_file(sound: &str) -> Option<SoundFile> {
         if sound.starts_with("tts://") {
             match SoundFile::new_tts(&sound[6..]).await {
@@ -132,6 +181,7 @@ impl SessionSound {
 }
 
 impl Drop for SessionSound {
+    /// On drop, publish a `SoundEnd` event for this session to the channel stream.
     fn drop(&mut self) {
         if self.channel_id != "" {
             let id = self.id.clone();
@@ -156,6 +206,9 @@ impl Drop for SessionSound {
 }
 
 impl SoundFile {
+    /// Load or fetch a named sound and ensure there is a local WAV at `/var/lib/nebula/sounds`.
+    ///
+    /// If not present, downloads from object storage and normalizes via `sox`.
     pub async fn new(name: &str) -> Result<SoundFile, Error> {
         let sound = MEDIA_SERVICE
             .db
@@ -193,6 +246,7 @@ impl SoundFile {
         Ok(SoundFile { path })
     }
 
+    /// Build a voicemail sound path, fetching from object storage if missing.
     pub async fn new_vm(name: &str) -> Result<SoundFile, Error> {
         let path = format!("/var/lib/nebula/sounds/vm-{}.wav", name);
         if fs::try_exists(&path).await.unwrap_or(false) {
@@ -207,18 +261,21 @@ impl SoundFile {
         Ok(SoundFile { path })
     }
 
+    /// Build a `SoundFile` pointing to a locally recorded WAV by UUID.
     pub fn new_record_file(uuid: &str) -> SoundFile {
         SoundFile {
             path: local_record_wav_file_path(uuid),
         }
     }
 
+    /// Build a `SoundFile` from an absolute/relative filesystem path.
     pub fn new_file(name: &str) -> SoundFile {
         SoundFile {
             path: name.to_string(),
         }
     }
 
+    /// Create a `SoundFile` from base64 content stored in Redis under `key`.
     pub async fn new_redis_file(key: &str) -> Result<SoundFile> {
         let path = format!("/var/lib/nebula/sounds/{}.wav", key);
         if fs::try_exists(&path).await.unwrap_or(false) {
@@ -230,6 +287,7 @@ impl SoundFile {
         Ok(SoundFile { path })
     }
 
+    /// Generate a tone WAV (two sine waves mixed with on/off cadence) and save it.
     pub async fn new_tone(tone: &str) -> Result<SoundFile> {
         let path = format!(
             "/var/lib/nebula/sounds/tone-{}.wav",
@@ -255,6 +313,9 @@ impl SoundFile {
         Ok(SoundFile { path })
     }
 
+    /// Synthesize speech via Google TTS into a 48kHz mono WAV and save it.
+    ///
+    /// Accepts optional `?voice=` query; defaults to `en-GB`.
     pub async fn new_tts(content: &str) -> Result<SoundFile, Error> {
         let path = format!(
             "/var/lib/nebula/sounds/tts-{}.wav",
@@ -297,6 +358,9 @@ impl SoundFile {
         Ok(SoundFile { path })
     }
 
+    /// Read a WAV file and stream PCM frames of length `ptime` at `dst_sample_rate`.
+    ///
+    /// Resamples if needed; returns an async channel receiver of `Vec<i16>` frames.
     pub async fn read(
         &self,
         ptime: usize,
@@ -364,6 +428,7 @@ impl SoundFile {
     }
 }
 
+/// Generate a single-frequency sine wave of `duration` ms at `rate` Hz.
 fn get_wave(rate: u32, duration: usize, freq: usize) -> Vec<i16> {
     let samples = (rate / 1000) as usize * duration;
     let mut phase = 0f64;
@@ -379,6 +444,7 @@ fn get_wave(rate: u32, duration: usize, freq: usize) -> Vec<i16> {
     pcm
 }
 
+/// Create a dual-tone PCM buffer with `on`/`off` cadence and two frequencies.
 fn tone_pcm(
     rate: u32,
     on: usize,
@@ -403,6 +469,7 @@ fn tone_pcm(
     pcm
 }
 
+/// Convert 16-bit mono PCM samples to a WAV byte vector (RIFF header + data).
 pub async fn pcm_to_wav(sample_rate: u32, pcm: Vec<i16>) -> Result<Vec<u8>> {
     nebula_task::spawn_task(move || -> Result<Vec<u8>> {
         let pcm_len = pcm.len();
@@ -436,10 +503,12 @@ pub async fn pcm_to_wav(sample_rate: u32, pcm: Vec<i16>) -> Result<Vec<u8>> {
     .await?
 }
 
+/// Local temporary WAV file path for a recording UUID.
 pub fn local_record_wav_file_path(uuid: &str) -> String {
     format!("/tmp/record-file-{}.wav", uuid)
 }
 
+/// Local temporary MP3 file path for a recording UUID.
 pub fn local_record_mp3_file_path(uuid: &str) -> String {
     format!("/tmp/record-file-{}.mp3", uuid)
 }

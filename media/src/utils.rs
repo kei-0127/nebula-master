@@ -1,10 +1,17 @@
+//! # Media Utilities
+//!
+//! Utility functions for media processing calculations.
+
 use std::ops::{Add, Mul};
 
+/// Smooth a signal with an exponential moving average.
+/// `alpha` in [0,1]: 0 keeps the old value; 1 jumps to the new value.
 pub fn exponential_moving_average<T: Mul<f64, Output = T> + Add<T, Output = T>>(
-    average: T,
-    alpha: f64,
-    update: T,
+    average: T,    // Current average
+    alpha: f64,    // Smoothing factor
+    update: T,     // New value
 ) -> T {
+    // Weighted average: new_value * alpha + old_average * (1 - alpha)
     (update * alpha) + (average * (1.0 - alpha))
 }
 

@@ -1,12 +1,18 @@
+//! # Ring Buffer Implementation
+//! 
+//! Fixed-size ring buffer for efficient data storage and retrieval.
+//! Automatically overwrites oldest data when full.
+
 use std::collections::VecDeque;
 
-/// A fixed size RingBuffer. On insert drops the oldest inserted item iff full.
+/// Fixed-capacity FIFO that overwrites the oldest item when full.
 pub struct RingBuffer<T> {
-    limit: usize,
-    values: VecDeque<T>,
+    limit: usize,        // Maximum number of items
+    values: VecDeque<T>, // Internal storage using VecDeque
 }
 
 impl<T> RingBuffer<T> {
+    /// Create a ring buffer with capacity `limit`; pushing past capacity drops the oldest.
     pub fn new(limit: usize) -> Self {
         Self {
             limit,
@@ -15,7 +21,7 @@ impl<T> RingBuffer<T> {
         }
     }
 
-    /// Iff pushing popped off an old value, return it.
+    /// Push a value; returns the evicted oldest item if at capacity.
     pub fn push(&mut self, value: T) -> Option<T> {
         self.values.push_back(value);
         if self.values.len() > self.limit {
@@ -25,20 +31,24 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Iterate from oldest to newest.
     pub fn iter(
         &self,
     ) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator + Clone + '_ {
         self.values.iter()
     }
 
+    /// Number of items currently stored.
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    /// True if there are no items.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
+    /// True if the buffer has reached its capacity.
     pub fn is_full(&self) -> bool {
         self.len() == self.limit
     }

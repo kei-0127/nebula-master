@@ -1,15 +1,25 @@
+//! # Audio Resampler
+//! 
+//! Audio sample rate conversion using high-quality FFT-based resampling.
+//! Converts audio between different sample rates while maintaining quality.
+
 use anyhow::Result;
 use rubato::{FftFixedIn, VecResampler};
 
+/// FFT-based mono audio resampler with low-latency, high-quality conversion.
 pub struct Resampler {
-    ratio: f64,
-    fft: FftFixedIn<f64>,
-    src_sample_rate: u32,
-    dst_sample_rate: u32,
-    src_pcm_len: usize,
+    ratio: f64,                    // Conversion ratio (dst/src)
+    fft: FftFixedIn<f64>,         // FFT-based resampler
+    src_sample_rate: u32,          // Input sample rate
+    dst_sample_rate: u32,          // Output sample rate
+    /// Expected input frame length in samples (mono). If the incoming frame
+    /// length changes at runtime, the resampler is reinitialized to match.
+    src_pcm_len: usize,            // Input buffer length
 }
 
 impl Resampler {
+    /// Create an FFT-based mono resampler from `src_sample_rate` to `dst_sample_rate`.
+    /// Starts with a default block size and adapts later if the input frame length changes.
     pub async fn new(
         src_sample_rate: u32,
         dst_sample_rate: u32,
@@ -37,9 +47,13 @@ impl Resampler {
         })
     }
 
+    
+    /// Resample one mono PCM frame to the target rate (approx length = `src.len() * ratio`).
+    /// If the frame size changes, reinitialize; on internal errors, return a zeroed frame.
     pub fn convert(&mut self, src: &[i16]) -> Vec<i16> {
         let src_len = src.len();
 
+        // Reconfigure the FFT resampler if the input frame size changed.
         if src_len != self.src_pcm_len {
             self.src_pcm_len = src_len;
             self.fft = FftFixedIn::new(
@@ -51,6 +65,7 @@ impl Resampler {
             );
         }
 
+        // Pre-compute a fallback output length for error cases.
         let dst_len = (src.len() as f64 * self.ratio) as usize;
 
         let src: Vec<f64> = src.iter().map(|i| *i as f64).collect();
