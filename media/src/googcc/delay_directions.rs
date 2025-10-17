@@ -49,6 +49,7 @@ impl<'a> From<&'a Ack> for AckGroupSummary {
 }
 
 // Yields (group_summary, next_after_group)
+/// Collect adjacent ACKs into timing groups, allowing small reordering within a group.
 fn accumulate_ack_groups(
     acks: impl Stream<Item = Ack>,
 ) -> impl Stream<Item = (AckGroupSummary, Ack)> {
@@ -435,6 +436,7 @@ const MAX_ARRIVAL_CHANGE: Duration = Duration::from_secs(3);
 const MAX_CONSECUTIVE_REORDERINGS: u16 = 3;
 
 // Yields (latest_ack, departure_delta, arrival_delta)
+/// Compute per-group deltas; drop out-of-order bursts and large jumps to stabilize trend.
 fn calculate_ack_deltas(
     groups: impl Stream<Item = (AckGroupSummary, Ack)>,
 ) -> impl Stream<Item = (Ack, Duration, TimeDelta)> {
@@ -732,6 +734,7 @@ mod calculate_ack_deltas_tests {
 }
 
 // Yields (now, delay_slope, duration, sample_count)
+/// Smooth delay over time and run a rolling linear regression to estimate delay slope.
 fn calculate_delay_slopes(
     ack_deltas: impl Stream<Item = (Ack, Duration, TimeDelta)>,
 ) -> impl Stream<Item = (Instant, f64, Duration, usize)> {
@@ -944,6 +947,7 @@ const MAX_DELAY_SLOPE_THRESHOLD: f64 = 2.5; // 2.5s/s
 const SLOPE_THRESHOLD_ADAPTATION_MAX_DIFFERENCE: f64 = 0.0625; // 62.5ms/s
 
 // Yields (latest_ack, direction)
+/// Classify delay slopes over time into Increasing/Decreasing/Steady with adaptive thresholds.
 fn calculate_delay_directions_from_slopes(
     delay_slopes: impl Stream<Item = (Instant, f64, Duration, usize)>,
 ) -> impl Stream<Item = (Instant, DelayDirection)> {
@@ -1035,6 +1039,7 @@ fn calculate_delay_directions_from_slopes(
     }
 }
 
+/// Public entry: derive delay direction trend from a stream of ACKs.
 pub fn calculate_delay_directions(
     acks: impl Stream<Item = Ack>,
 ) -> impl Stream<Item = (Instant, DelayDirection)> {

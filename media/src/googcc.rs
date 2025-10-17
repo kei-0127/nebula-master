@@ -1,3 +1,8 @@
+//! # Google Congestion Control (GoogCC)
+//! 
+//! Google's congestion control algorithm for WebRTC.
+//! Dynamically adjusts media bitrate based on network conditions.
+
 use std::cmp::{max, min};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -25,26 +30,25 @@ use feedback_rtts::*;
 mod stream;
 use stream::StreamExt as OurStreamExt;
 
+/// Configuration for Google Congestion Control
+/// 
+/// This struct defines the parameters for the GoogCC algorithm,
+/// including target bitrate ranges and initial settings.
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub initial_target_send_rate: DataRate,
-    pub min_target_send_rate: DataRate,
-    pub max_target_send_rate: DataRate,
+    pub initial_target_send_rate: DataRate,  // Starting bitrate
+    pub min_target_send_rate: DataRate,       // Minimum allowed bitrate
+    pub max_target_send_rate: DataRate,       // Maximum allowed bitrate
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            // This is also used when we go from limited by the ideal send rate
-            // to not limited by the ideal send rate.
-            // We want it high enough to get a good experience,
-            // but not too high to risk overuse.
-            // Seeing one video at VGA is around 800kbps.
-            // Seeing 4 videos at QVGA is around 800kbps total.
-            // Seeing 16 videos at QQVGA is around 800kbps total.
-            initial_target_send_rate: DataRate::from_kbps(5000),
-            min_target_send_rate: DataRate::from_kbps(100),
-            max_target_send_rate: DataRate::from_kbps(30000),
+            // Default bitrate settings for optimal WebRTC performance
+            // These values are tuned for typical network conditions
+            initial_target_send_rate: DataRate::from_kbps(5000),  // 5 Mbps initial rate
+            min_target_send_rate: DataRate::from_kbps(100),       // 100 kbps minimum
+            max_target_send_rate: DataRate::from_kbps(30000),     // 30 Mbps maximum
         }
     }
 }
@@ -57,8 +61,10 @@ impl Config {
 
 #[derive(Clone, Debug, Default)]
 pub struct Request {
+    /// Baseline we want to at least reach quickly when ramping up.
     // If we're below this, try to ramp up to it quickly.
     pub base: DataRate,
+    /// Soft cap we try not to exceed; keeps headroom to avoid oscillations.
     // There's no point going much above this.
     // It's effectively a max, but we have to leave some
     // headroom above it so that fluctuations in the
@@ -69,6 +75,7 @@ pub struct Request {
     pub ideal: DataRate,
 }
 
+/// Maintains GoogCC signal streams and computes the target send rate.
 pub struct CongestionController {
     current_request: Option<Request>,
     acks_sender1: UnboundedSender<Vec<Ack>>,
@@ -81,6 +88,7 @@ pub struct CongestionController {
 }
 
 impl CongestionController {
+    /// Wire up the GoogCC signal pipeline (RTT, acked rate, delay direction) and target calculator.
     pub fn new(config: Config, now: Instant) -> Self {
         //                                       Acks                                    Latest Request
         //                                        |                                            |
@@ -131,10 +139,13 @@ impl CongestionController {
         }
     }
 
+    /// Update the external request (baseline/ideal) that guides the target rate.
     pub fn request(&mut self, request: Request) {
         self.current_request = Some(request);
     }
 
+    /// Feed fresh ACKs and produce a new target send rate if something changed.
+    /// Internally updates RTT, acked_rate, and delay trend, then adjusts the target.
     pub fn recalculate_target_send_rate(
         &mut self,
         mut acks: Vec<Ack>,
@@ -175,6 +186,8 @@ impl CongestionController {
     }
 }
 
+/// Internal calculator that folds in delay trend, RTT, and acked rate
+/// to produce the next target send rate within configured bounds.
 struct TargetCalculator {
     acked_rate: Option<DataRate>,
     acked_rate_when_overusing: RateAverager,

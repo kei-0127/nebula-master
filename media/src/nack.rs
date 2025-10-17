@@ -1,14 +1,57 @@
+//! # Negative Acknowledgment (NACK) Implementation
+//! 
+//! This module provides Negative Acknowledgment (NACK) functionality for
+//! RTP packet loss detection and recovery. NACK allows receivers to request
+//! retransmission of lost packets, improving media quality and reliability.
+//! 
+//! ## Key Features
+//! 
+//! - **Packet Loss Detection**: Detect missing RTP packets by sequence number
+//! - **NACK Generation**: Generate NACK messages for lost packets
+//! - **Retransmission Requests**: Request retransmission of lost packets
+//! - **Sequence Tracking**: Track received packet sequence numbers
+//! - **Loss Recovery**: Improve media quality through packet recovery
+//! 
+//! ## NACK Process
+//! 
+//! 1. **Packet Reception**: Track received packet sequence numbers
+//! 2. **Loss Detection**: Identify missing sequence numbers
+//! 3. **NACK Generation**: Create NACK messages for lost packets
+//! 4. **Retransmission**: Request sender to retransmit lost packets
+//! 5. **Recovery**: Receive and process retransmitted packets
+//! 
+//! ## Usage
+//! 
+//! ```rust
+//! use nebula_media::nack::NackSender;
+//! use std::time::Instant;
+//! 
+//! // Create NACK sender
+//! let mut nack_sender = NackSender::new(1000);
+//! 
+//! // Track received packets; gaps become candidates for NACK
+//! nack_sender.remember_received(100);
+//! nack_sender.remember_received(103); // 101,102 will be marked missing
+//! 
+//! // Ask which sequence numbers we should NACK right now (rate-limited)
+//! if let Some(to_nack) = nack_sender.send_nacks(Instant::now()) {
+//!     for seq in to_nack { /* send NACK for seq */ }
+//! }
+//! ```
+
 use std::time::{Duration, Instant};
 
 use crate::key_sorted_cache::KeySortedCache;
 
+/// Tracks which RTP packets arrived and which went missing, and tells you which ones to NACK.
 pub struct NackSender {
-    limit: usize,
-    sent_by_seqnum: KeySortedCache<u64, Option<(Instant, Instant)>>,
-    max_received: Option<u64>,
+    limit: usize,                                                    // Maximum sequence numbers to track
+    sent_by_seqnum: KeySortedCache<u64, Option<(Instant, Instant)>>, // Tracked sequence numbers
+    max_received: Option<u64>,                                       // Highest received sequence number
 }
 
 impl NackSender {
+    /// Start a NACK tracker; `limit` bounds how many sequence numbers we remember at once.
     pub fn new(limit: usize) -> Self {
         Self {
             limit,
@@ -17,7 +60,7 @@ impl NackSender {
         }
     }
 
-    // If there are any new unreceived seqnums (the need to send nacks), returns the necessary seqnums to nack.
+    /// Tell the tracker you received `seqnum`; any gap since the last max gets marked to be NACKed.
     pub fn remember_received(&mut self, seqnum: u64) {
         use std::cmp::Ordering::*;
 
@@ -56,6 +99,8 @@ impl NackSender {
     }
 
     #[allow(clippy::needless_lifetimes)]
+    /// Return the sequence numbers that should be NACKed now, obeying simple rate limits.
+    /// Entries expire after ~2s; if still missing, we re-ask every ~200ms.
     pub fn send_nacks<'sender>(
         &'sender mut self,
         now: Instant,
