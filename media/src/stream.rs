@@ -1,39 +1,40 @@
-// # Media Stream Processing
-// 
+// Media Stream Processing
+//
 // RTP media streams for real-time communication.
 // Processes audio/video packets, manages codecs, and ensures high-quality delivery.
-// 
+
 // MediaStreamReceiver - AudioStreamReceiver - StreamSenderPool (RTP out)
-// │ │ └─ Voicemail/Redis record
-// │ └─ RPC state changes
-// └─ VideoStreamReceiver - StreamSenderPool (RTP out)
-// ├─ NACK/TCC/PLI to senders
-// └─ Allocation updates (via VideoStreamSource)
+// - Voicemail/Redis record
+// - RPC state changes
+// - VideoStreamReceiver - StreamSenderPool (RTP out)
+// - NACK/TCC/PLI to senders
+// - Allocation updates (via VideoStreamSource)
 
 // StreamSenderPool
-// ├─ UDP RTP in - RtpPacket(src,dst) - per-stream StreamSender
-// ├─ UDP RTCP in - RtcpPacket(uuid) - per-stream StreamSender
-// ├─ Recording in - InboundRecording(uuid) - per-stream
-// └─ RPC (MEDIA_STREAM) - MediaService::process_rpc - per-stream
-// StreamSender (per stream)
+// - UDP RTP in - RtpPacket(src, dst) - per-stream StreamSnder
+// - UDP RTCP in - RtcpPacket(uuid) - per-stream StreamSender
+// - Recording in - InboundRecording(uuid) - per-stream
+// - RPC (MEDIA_STREAM) - MediaService::process_rpc - per-stream
+// 
+// StreamSender (per-stream)
 // AudioLocal
-// ├─ prepare_rtp_packets -> encrypt_rtp -> RtpOut::send (tick)
-// ├─ process_inbound_recording -> decode -> record
-// └─ process_rpc_msg (SetPeerAddr, DTMF, Recording, Sounds, T38)
+// - prepare_rtp_packets -> encryp_rtp -> RtpOut::send(tick)
+// - process_inbound_recording -> decode-> record
+// - process_rpc_msg (SetPeerAddr, DTMF, Recording, Sounds, T38)
 // AudioRemote
-// └─ forward RTP/RTCP to remote_udp/remote_rtcp_udp
+// - forward RTP/RTCP to remote_udp/remote_rtcp_udp
 // VideoLocal
-// ├─ receive_rtp: VP8 rewrite, RTX remember
-// ├─ send_rtp_packet: TCC seq -> (S)RTP -> send
-// ├─ process_transportcc: GoogCC -> available_rate
-// └─ process_transportnack: RTX resend
-// VideoRemote
-// └─ forward RTP/RTCP to remote_udp/remote_rtcp_udp
+// - receive_rtp: VP8 rewrite, RTX remember
+// - send_rtp_packet: TCC seq -> (S)RTP -> send
+// - process_transportcc: GoogCC -> available_rate
+// - process_transportnack: RTX resend
+//VideoRemote
+// - forward RTP/RTCP to remote_udp/remote_rtcp_udp
 // VideoPeer
-// └─ send_frame: encode(H.264) -> RTP -> (S)RTP -> send
+// - send_frame: encode(H.264) -> RTP -> (S)RTP -> send
 // Control/reporting lines (dotted)
-// Redis: SDP/crypto/ip/layers/keepalive
-// MediaService.switchboard_rpc_client:
+// Redis: SDP/scrypto/ip/layers/keepalive
+// MediaService.switchboard_rppc_client::
 // notify_audio_level, notify_available_rate, finish_call_recording, request_keyframe, update_video_destination_layer, notify_video_allocations
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -105,43 +106,39 @@ use crate::sound::{
 use crate::srtp::CryptoContext;
 use crate::transportcc::{expand_truncated_counter, TccReceiver, TccSender};
 
-// Network ports for media streams
 const REMOTE_RTP_PORT: u16 = 9876;  // RTP media packets
 const REMOTE_RTCP_PORT: u16 = 9877; // RTCP control packets
 const RECORDING_PORT: u16 = 8765;   // Call recording
 
 // Audio processing thresholds
-const THRESHOLD: f64 = 0.6;         // Silence detection threshold
-const ACTUAL_THRESHOLD: f64 = THRESHOLD * 0x7fff as f64; // Convert to 16-bit range
-const ALPHA: f64 = 7.48338;         // Audio processing coefficient
+const THRESHOLD: f64 = 0.6;     // Silence detection threshold
+const ACTUAL_THRESHOLD: f64 = THRESHOLD * 0x7fff as f64;    // Convert to 16 bit range
+const ALPHA: f64 = 7.48338;     // Audio processing coefficient
 
 // Network quality control
 const NACK_CALCULATION_INTERVAL: Duration = Duration::from_millis(20); // Minimum interval between NACK computations/sends (rate limit)
-
-// DTMF (touch-tone) digits supported
 const DTMF_DIGITS: [&'static str; 17] = [
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "#", "A", "B", "C", "D",
-    "X", // X is used for special purposes
+    "X",
 ];
 
 // RTP sequence number types
-pub type TruncatedSequenceNumber = u16; // What actually goes in the packet (16-bit)
-pub type FullSequenceNumber = u64;      // Extended sequence number (48-bit due to SRTP limits)
-pub type FullTimestamp = u64;           // RTP timestamp
-pub type Ssrc = u32;                    // Synchronization source identifier
+pub type TruncatedSequenceNumber = u16; // What actually goes in the packet (16 bit)
+pub type FullSequenceNumber = u64; // Really u48 due to limitations of SRTP (48 bit due to SRTP limits)
+pub type FullTimestamp = u64;   // RTP timestamp
+pub type Ssrc = u32;            // Synchronization source identifier
 
-/// Outgoing RTP packet handler
-/// Manages outgoing RTP packets and transmission to remote peers
 pub struct RtpOut {
-    rtp_packets: Vec<RtpPacket>,  // Packets to send
-    t38: bool,                     // Fax over IP (T.38) mode
-    peer_transport: PeerTransport, // Network transport
-    mode: MediaMode,               // Send/receive mode
+    rtp_packets: Vec<RtpPacket>,
+    t38: bool,
+    peer_transport: PeerTransport,  // Network transport
+    mode: MediaMode,            // Send/receive mode
 }
 
 impl RtpOut {
-    /// Flush prepared RTP. Skips fax/T.38 and non-sendrecv; otherwise sends all packets to the peer.
+    // Flush prepared RTP. Skips  fax/T.38 and non-sendrecv; otherwise sends all packets to the peer
     async fn send(self) -> Result<()> {
+        
         // Skip T.38 fax mode
         if self.t38 {
             return Ok(());
@@ -205,7 +202,8 @@ pub enum PeerTransport {
 }
 
 impl PeerTransport {
-    /// Send bytes to the peer using the active transport (local channel, UDP, or raw IP).
+
+    // Send bytes to the peer using the active transport (local channel, UDP, or raw IP)
     pub async fn send(&self, buf: &[u8]) -> Result<()> {
         match &self {
             PeerTransport::LocalPeer(sender) => {
@@ -226,7 +224,7 @@ impl PeerTransport {
         Ok(())
     }
 
-    /// Update the peer IP/port (after ICE or re-INVITE) so future packets go to the right place.
+    // Update the peer IP/port (after ICE or re-INVITE) so future packets go to the right place
     pub fn set_peer_addr(&mut self, peer_ip: Ipv4Addr, peer_port: u16) {
         match &mut *self {
             PeerTransport::LocalPeer(_) => {}
@@ -246,14 +244,14 @@ impl PeerTransport {
         }
     }
 
-    /// True if this is an in-process LocalPeer (no network hops).
-    fn is_local(&self) -> bool {
-        matches!(self, PeerTransport::LocalPeer(_))
-    }
+    // fn is_local(&self) -> bool {
+    //     matches!(self, PeerTransport::LocalPeer(_))
+    // }
 }
 
-// VP8 IDs that we rewrite when forwarding
-// Convenience struct to track all 4 IDs together for Vp8SimulcastRtpForwarder
+// These are the IDs that we rewrite when forwarding VP8.
+// These is a convenience for keep track of all 4 together,
+// which is a common thing in Vp8SimulcastRtpForwarder.
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 struct Vp8RewrittenIds {
     seqnum: FullSequenceNumber,
@@ -312,7 +310,8 @@ pub enum MediaStreamReceiver {
 }
 
 impl MediaStreamReceiver {
-    /// Background RPC loop for this stream. Forwards control messages to the data path.
+
+    // Background RPC loop for this stream, forwards control messages to the data path
     async fn stream_process_rpc(
         id: Uuid,
         sender: UnboundedSender<StreamReceiverMessage>,
@@ -333,7 +332,7 @@ impl MediaStreamReceiver {
         }
     }
 
-    /// Stream receiver main loop. Reads messages, handles RTP/RTCP, routing, recording, and RPCs.
+    // Stream receiver main loop : read messages, handle RTP/RTCP, routing and RPCs
     pub async fn process_packets(
         id: Uuid,
         channel: String,
@@ -438,7 +437,7 @@ impl MediaStreamReceiver {
 
         let remote_media = get_media(MediaDescKind::Remote, &id)
             .await
-            .ok_or(anyhow!("no remote media"))?;
+            .ok_or(anyhow!("no reomte media"))?;
 
         match offer_media.media_type {
             MediaType::Image => loop {
@@ -585,14 +584,13 @@ pub struct RemoteStreamSenderMonitor {
 }
 
 impl Default for RemoteStreamSenderMonitor {
-    /// Default constructor that just calls new().
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl RemoteStreamSenderMonitor {
-    /// Create a liveness monitor backed by concurrent sets.
+    // Create a liveness monitor backed by concurrent sets
     pub fn new() -> Self {
         Self {
             live_ips: Arc::new(scc::HashSet::new()),
@@ -600,9 +598,10 @@ impl RemoteStreamSenderMonitor {
         }
     }
 
-    /// Periodically check Redis to update liveness for this IP.
+    // Periodically check Redis to update liveness for this IP
     async fn run_check_ip(&self, ip: String) {
         let mut ticker = tokio::time::interval(Duration::from_millis(1000));
+        // Key is redis hearbeat key for ip
         let key = format!("nebula:media_server:{ip}:live");
         loop {
             self.check_ip_live(&key, &ip).await;
@@ -610,7 +609,7 @@ impl RemoteStreamSenderMonitor {
         }
     }
 
-    /// Add or remove IP from the live set based on Redis presence.
+    // Add or remove IP from the live set based on Redis presence 
     async fn check_ip_live(&self, key: &str, ip: &str) {
         let exists = REDIS.exists(key).await.unwrap_or(false);
         if exists {
@@ -627,7 +626,7 @@ impl RemoteStreamSenderMonitor {
         }
     }
 
-    /// True if we consider this IP live; unseen IPs start a background probe.
+    // True if we consider this IP live then unseen IPs start a background probe
     pub async fn is_live(&self, ip: &str) -> bool {
         if ip == MEDIA_SERVICE.local_ip {
             return true;
@@ -647,29 +646,49 @@ impl RemoteStreamSenderMonitor {
     }
 }
 
-//              ┌─────────────────────────────┐
-//              │ AudioStreamSenderPool.run() │
-//              └─────────────┬───────────────┘
-//                            │
-//     ┌──────────────────────┼───────────────────────┐
-//     │                      │                       │
-//  [RTP UDP]           [RTCP UDP]             [Recording UDP]
-//     │                      │                       │
-//     └─────────→ StreamSenderPoolMessage →──────────┘
-//                            │
-//                            ▼
-//                [Main Pool Event Loop]
-//                            │
-//            ┌───────────────┴────────────────┐
-//            │ existing stream?               │
-//            ├───────────────┬────────────────┤
-//            │ yes            │ no            │
-//            ▼                ▼               │
-//    send message        spawn new stream ────┘
-//                            │
-//              StreamSender::process_packets()
-//                            │
-//                handles per-call RTP/RTCP
+//               +---------------------------------+
+//               | AudioStreamSenderPool::new()    |
+//               +---------------------------------+
+//               | - Bind RTP / RTCP / Recording UDP sockets
+//               | - Start runtimes: timer / sender / recording
+//               | - Return initialized pool			 |
+//               +--------------------+------------+
+//                                    |
+//                                    |
+//               +---------------------------------+
+//               | AudioStreamSenderPool::run()    |
+//               +---------------------------------+
+//               | Spawns background tasks:        |
+//               |   • Redis heartbeat             |
+//               |   • RTP UDP listener            |
+//               |   • RTCP UDP listener           |
+//               |   • Recording UDP listener      |
+//               |   • RPC message consumer        |
+//               +--------------------+------------+
+//                                    |
+//                        StreamSenderPoolMessage
+//                                    |
+//                                    |
+//                         [Main Pool Event Loop]
+//                                    |
+//                +-------------------+--------------------+
+//                | Existing stream for call UUID?         |
+//                +-------------------+--------------------+
+//                | Yes                                   | No
+//                |                                       |
+//      +-------------------+                 +---------------------------+
+//      | send message to   |                 | create new channel pair   |
+//      | existing sender   |                 | spawn StreamSender task   |
+//      +-------------------+                 +---------------------------+
+//                                                      |
+//                                                      |
+//                          +-------------------------------------------+
+//                          | StreamSender::process_packets()           |
+//                          | - Handles per-call RTP / RTCP loop        |
+//                          | - Sends / receives media packets          |
+//                          | - Manages timers, retransmits, recording  |
+//                          +-------------------------------------------+
+
 
 pub struct AudioStreamSenderPool {
     remote_rtp_udp: Arc<UdpSocket>,
@@ -686,7 +705,9 @@ pub struct AudioStreamSenderPool {
 }
 
 impl AudioStreamSenderPool {
-    /// Create the shared sender pool. Binds UDP sockets and spins runtimes for timers, senders, and recording.
+
+    // Create the shared sender pool
+    // Binds UDP sockets and spins runtimes for timers, senders, and recording
     pub async fn new(
         sender: UnboundedSender<StreamSenderPoolMessage>,
         receiver: UnboundedReceiver<StreamSenderPoolMessage>,
@@ -738,7 +759,7 @@ impl AudioStreamSenderPool {
         })
     }
 
-    /// Main event loop for all senders. Spawns UDP readers and RPC consumer, then fans out messages to per-call tasks.
+    // This is main loop for all senders, spawns UDP reader and RPC consumer, then fans out messages to per-call tasks
     pub async fn run(&mut self) {
         let local_ip = MEDIA_SERVICE.local_ip.clone();
         tokio::spawn(async move {
@@ -798,7 +819,7 @@ impl AudioStreamSenderPool {
             let remote_rtcp_udp = self.remote_rtcp_udp.clone();
             let sender = self.sender.clone();
             tokio::spawn(async move {
-            let mut buf = [0; 5000];
+                let mut buf = [0; 5000];
                 loop {
                     if let Ok(n) = remote_rtcp_udp.recv(&mut buf).await {
                         let (uuid, packet) = buf[..n].split_at(16);
@@ -806,7 +827,7 @@ impl AudioStreamSenderPool {
                             let _ =
                                 sender.send(StreamSenderPoolMessage::RtcpPacket(
                                     uuid,
-                                packet.to_vec(),
+                                    packet.to_vec(),
                                 ));
                         }
                     }
@@ -970,7 +991,7 @@ impl StreamVoicemail {
         })
     }
 
-    /// Finalize MP3 upload, flush WAV metadata, and notify that the voicemail uploaded.
+    // Upload MP3 finally, flush wav metadata and notify that the voicemail uploaded
     async fn finish(&mut self) -> Result<()> {
         MEDIA_SERVICE
             .storage_client
@@ -981,7 +1002,7 @@ impl StreamVoicemail {
         Ok(())
     }
 
-    /// Append WAV and chunk-upload MP3 using LAME; stays off the hot path.
+    // Append wav and chunk-upload mp3 using lame: stays off the hot path
     async fn new_pcm(&mut self, pcm: Vec<i16>) -> Result<()> {
         let path = format!("/var/lib/nebula/voicemails/{}.wav", &self.cdr);
         if !self.wav_file_initiated {
@@ -1032,7 +1053,7 @@ impl StreamVoicemail {
         Ok(())
     }
 
-    /// Fix WAV header sizes, upload the WAV artifact, and clean up the temp file.
+    // Fix wav header sizes, upload the wav artifact and clean up the temp file
     async fn upload_wav(&self) -> Result<()> {
         let path = format!("/var/lib/nebula/voicemails/{}.wav", &self.cdr);
         if !self.wav.is_empty() {
@@ -1180,8 +1201,8 @@ impl AudioStreamReceiver {
         })
     }
 
-    /// Handle RPCs for the audio receiver: mute/mode, crypto reinvite, voicemail/redis recording,
-    /// destination refresh, DTMF/sound-related controls.
+    // Handle RPCs for the audio receiver: mute/mode, crypto reinvite, voicemail/redis recording
+    // destination refresh, DTMF/ sound-related controls
     async fn process_rpc_msg(&mut self, rpc_msg: RpcMessage) -> Result<()> {
         match &rpc_msg.method {
             RpcMethod::UpdateMediaDestinations => {
@@ -1251,7 +1272,9 @@ impl AudioStreamReceiver {
         Ok(())
     }
 
-    /// Process RTCP for audio. Decrypt if needed and refresh activity/keepalive markers.
+
+    // Process RTCP for audio
+    // Decrypt if needed and refresh activity/keepalive markers
     async fn receive_rtcp_packet(&mut self, mut rtcp_packet: Vec<u8>) -> Result<()> {
         let _ = REDIS
             .hsetex(
@@ -1273,17 +1296,17 @@ impl AudioStreamReceiver {
         Ok(())
     }
 
-    /// Per incoming audio RTP:
-    /// - refresh keepalive (every ~5s)
-    /// - if SRTP: decrypt
-    /// - if not Sendrecv or muted: drop
-    /// - if T.38 passthrough: fan-out raw RTP to destinations and return
-    /// - parse RTP; handle telephone-event PT (dedupe by timestamp, publish DTMF and notify switchboard)
-    ///   or run in-band DTMF decoder when needed
-    /// - fan-out RTP to destinations and inbound recording
-    /// - if voicemail on: decode to PCM and append
-    /// - if Redis recorder on: accumulate PCM and store WAV when full
-    /// - if in a room: report audio level from ext id=1 (rate-limited)
+    // Per incoming audio RTP:
+    // - refresh keepalive (every ~5s)
+    // - if SRTP: decrypt
+    // - if not Sendrecv or muted: drop
+    // - if T.38 passthrough: fan-out raw RTP to destinations and return
+    // - parse RTP; handle telephone-event (dedupe by timestamp, publish DTMF and notify switchboard)
+    //   or run in-band DTMF decoder when needed
+    // - fan-out RTP to destinations and inbound recording
+    // - if voicemail on : decode to PCM and append
+    // - if Redis recorder on: accumulate PCM and store wav when full
+    // - if in a room: report audio level from ext id = 1 (rate-limited)
     pub async fn receive_rtp_packet(
         &mut self,
         mut raw_rtp_packet: Vec<u8>,
@@ -1460,7 +1483,7 @@ impl AudioStreamReceiver {
                 self.destinations.as_ref().unwrap()
             }
         };
-            let packet = Bytes::from(raw_rtp_packet);
+        let packet = Bytes::from(raw_rtp_packet.clone());
         for destination in destinations {
             let msg = StreamSenderPoolMessage::RtpPacket(
                 self.id,
@@ -1473,7 +1496,7 @@ impl AudioStreamReceiver {
             self.stream_sender_pool
                 .send(StreamSenderPoolMessage::InboundRecording(
                     self.id,
-                        packet.to_vec(),
+                    packet.to_vec(),
                 ));
 
         if let Some(voicemail) = self.voicemail.as_mut() {
@@ -1555,7 +1578,7 @@ impl AudioStreamReceiver {
         Ok(())
     }
 
-    /// Start voicemail capture for this stream using the negotiated sample rate.
+    // Start voicemail capture for this stream using the negotiated sample rate
     async fn start_voicemail(&mut self, cdr: String) -> Result<()> {
         if self.voicemail.is_some() {
             return Ok(());
@@ -1577,7 +1600,7 @@ impl AudioStreamReceiver {
         Ok(())
     }
 
-    /// Decode a codec payload to PCM on a worker thread to avoid blocking.
+    // Decode a codec payload to PCM on a worker thread to avoid blocking
     async fn decode(
         codec: Arc<BlockMutex<Box<dyn Codec>>>,
         payload: Vec<u8>,
@@ -1593,12 +1616,12 @@ impl AudioStreamReceiver {
 }
 
 pub struct FileRecorder {
+    // Upload a finished local recording (wav/mp3) for the given UUID to storage
     uuid: String,
     sender: UnboundedSender<Vec<i16>>,
 }
 
 impl FileRecorder {
-    /// Upload a finished local recording (WAV/MP3) for the given UUID to storage.
     pub async fn upload(uuid: String) -> Result<()> {
         let wav_path = local_record_wav_file_path(&uuid);
         let mp3_path = local_record_mp3_file_path(&uuid);
@@ -1613,7 +1636,7 @@ impl FileRecorder {
         Ok(())
     }
 
-    /// Start a local file recorder. Spawns a background task to write WAV/MP3 progressively.
+    // Start a local file recorder, spawns a background task to write wav/mp3 progressively
     pub fn new(
         uuid: String,
         rate: u32,
@@ -1633,7 +1656,7 @@ impl FileRecorder {
         Self { uuid, sender }
     }
 
-    /// Background loop: on every ptime, pull PCM (or silence), append WAV/MP3 buffers, and flush in chunks.
+    // Background loop: on every ptime, pull PCM (or silence), append wav/mp3 buffers, and flush in chunks
     async fn run(
         mut receiver: UnboundedReceiver<Vec<i16>>,
         wav_path: String,
@@ -1737,7 +1760,8 @@ pub struct StreamRecording {
 }
 
 impl StreamRecording {
-    /// Start dual-channel stream recording (inbound/outbound). Sets up metadata, channels, and optional resamplers.
+    // Start dual-channel stream recording (inbound/outbound)
+    // Set up metadata, channels and optional resamplers
     pub async fn new(
         uuid: Uuid,
         channel: String,
@@ -1812,10 +1836,10 @@ impl StreamRecording {
         })
     }
 
-    /// Recording worker loop. Each ptime:
-    /// - pull inbound/outbound PCM (fill silence if empty), mix to mono and encode to MP3 (also stereo MP3)
-    /// - append to local files and to resumable-upload buffers; periodically flush chunks
-    /// On stop: if channel not hung up, persist buffers to Redis to resume later; else finalize both uploads, delete temp files, and notify switchboard.
+    // Recording worker loop
+    // - pull inbound/outbound PCM (fill silence if empty), mix to mono and encode to MP3 (or stereo MP3)
+    // - append to local files and to resumable-upload buffers; periodically flush chunks
+    // On stop: if channel not hung up, persist bufers to Redis to resume later; else finalize both uploads, delete temp files and notify switchboard
     async fn run(
         uuid: Uuid,
         channel: String,
@@ -2099,7 +2123,7 @@ pub struct StreamLocalState {
 }
 
 impl StreamLocalState {
-    /// Construct per-stream sender state: codec, RTP template, optional recording, and SRTP context.
+    // Construct per stream sender state: codec, RTP template, optional recording and SRTP context
     pub async fn new(
         uuid: Uuid,
         channel: String,
@@ -2185,20 +2209,20 @@ impl StreamLocalState {
         })
     }
 
-    /// Advance only the sequence number on a clone, useful for repeated payloads (e.g., DTMF).
+    // Advance only the sequence number on a clone, useful for repeated payloads
     pub fn next_seq_rtp_packet(&self, rtp_packet: &mut RtpPacket) -> RtpPacket {
         rtp_packet.next_seq();
         rtp_packet.clone()
     }
 
-    /// Advance timestamp and sequence for the next media packet at the configured ptime.
+    // Advance timestamp and sequence for the next media packet at the configured ptiime
     pub fn next_rtp_packet(&mut self) -> RtpPacket {
         self.rtp_packet.next(self.ts_len);
         self.rtp_packet.clone()
     }
 }
 
-/// Create a loopback peer for local streams (no network hop).
+// Create a loopback peer for local streams 
 async fn new_local_peer(
     uuid: Uuid,
     stream_sender_pool: UnboundedSender<StreamSenderPoolMessage>,
@@ -2266,7 +2290,7 @@ async fn new_local_peer(
     Ok(PeerTransport::LocalPeer(sender))
 }
 
-/// Build the right transport for a stream: local loopback, peer-conn UDP, or raw socket.
+// Build the right ttransport for a stream: local loopback, peer-conn UDP, or raw socket
 async fn new_peer_transport(
     uuid: Uuid,
     pc_udp: Arc<UdpSocket>,
@@ -2393,8 +2417,8 @@ impl AudioStreamSenderLocal {
         Ok(stream)
     }
 
-    /// Audio sender inbound handling: either pass through T.38 to peer transport,
-    /// or buffer/match sources by SSRC/PT and feed the jitter buffer for local mixing/encoding.
+    // Audio sender inbound handling: either pass through T.38 to peer transport
+    //  or buffer/match sources by SSRC/PT and feed the jitter buffer for local mixing/encoding
     async fn receive_rtp(
         &mut self,
         source_id: Uuid,
@@ -2764,7 +2788,7 @@ impl AudioStreamSenderLocal {
         Ok(())
     }
 
-    /// Encode PCM to codec payload on a priority worker; keeps the send loop snappy.
+    // Encode PCM to codec payload on a priority worker; keeps the send loop snappy
     async fn encode(&self, pcm: Vec<i16>) -> Result<Vec<u8>> {
         let codec = self.state.codec.clone();
         let payload =
@@ -2777,7 +2801,7 @@ impl AudioStreamSenderLocal {
         Ok(payload)
     }
 
-    /// Decode codec payload to PCM on a worker thread to avoid blocking.
+    // Decode codec payload to PCM on a worker thread to avoid blocking
     async fn decode(&self, payload: Vec<u8>) -> Result<Vec<i16>> {
         let codec = self.state.codec.clone();
         let pcm = nebula_task::spawn_task(move || -> Result<Vec<i16>> {
@@ -2789,7 +2813,8 @@ impl AudioStreamSenderLocal {
         Ok(pcm)
     }
 
-    /// Pop one frame per source, mix PCM (or silence); handle fax (PCM/T.38). Returns (payload?, pcm, silent, t38).
+    // Pop one frame per source, mix PCM (or silence), handle fax (PCM/T.38)
+    // Returns (payload?, pcm, silent, t38)
     async fn get_src_rtp(&self) -> (Option<Vec<u8>>, Vec<i16>, bool, bool) {
         let mut task_set = JoinSet::new();
         for src_rtp in self.state.source_rtp.values() {
@@ -2876,8 +2901,8 @@ impl AudioStreamSenderLocal {
         }
     }
 
-    /// Build next outbound payload/PCM for audio: pull sources (or silence), overlay ringtone/MOH/sound
-    /// (blocking when configured), encode if needed, and indicate T.38 passthrough.
+    // Build next outbound payload/PCM for audio: pull sources oerlay ringtone/MOH/sound
+    // (blocking when configured), encode if needed and indicate T.38 passthrough
     async fn get_rtp_out(&mut self) -> Result<(Vec<u8>, Vec<i16>, bool)> {
         let src_rtp = self.get_src_rtp().await;
 
@@ -2992,7 +3017,7 @@ impl AudioStreamSenderLocal {
         Ok((payload, pcm, t38))
     }
 
-    /// Align sequence and timestamp with persisted start so mid-call restarts stay seamless.
+    // Align sequence  and timestamp with persisted start so mid-call restarts stay seamless
     async fn check_rtp_seq_and_timestamp(&mut self) {
         let key = &format!("nebula:media_stream:{}", &self.uuid.to_string());
 
@@ -3056,7 +3081,6 @@ impl AudioStreamSenderLocal {
 
     /// check the running status and webrtc status
     /// and start to run the rtp sending event loop
-    /// Kick off the periodic sender task; waits for DTLS on WebRTC before running.
     fn start_run(&mut self) {
         if self.state.running {
             return;
@@ -3180,7 +3204,7 @@ impl AudioStreamSenderLocal {
         // }
     }
 
-    /// Prepare the next batch of RTP packets (or a no-op when not sending).
+    // Prepare the next batch of RTP packets, handling marker and SRTP
     async fn prepare_rtp_packets(&mut self, tx: OwnedPermit<RtpOut>) -> Result<()> {
         let (payload, pcm, t38) = self.get_rtp_out().await?;
         let mode = self.state.mode.clone();
@@ -3234,7 +3258,7 @@ impl AudioStreamSenderLocal {
         Ok(())
     }
 
-    /// Turn a payload (or DTMF) into one or more RTP packets, handling marker and SRTP.
+    // Turn a payload ( or DTMF ) into one or more RTP packets, handling marker and SRTP
     async fn get_rtp_packets(
         &mut self,
         payload: Vec<u8>,
@@ -3281,7 +3305,7 @@ impl AudioStreamSenderLocal {
         Ok((rtp_packets, pcm))
     }
 
-    /// If sending DTMF, pop the next payload and timestamp; mark first packet and repeat lead frames.
+    //If sending DTMF, opop the next payload and timestampl mark first packet and repeat lead frames
     async fn get_sending_dtmf(&mut self, ts: u32) -> Option<(bool, u32, Vec<u8>)> {
         if self.state.dtmf.is_empty() {
             return None;
@@ -3304,7 +3328,7 @@ impl AudioStreamSenderLocal {
         Some((first, ts, dtmf_payload?))
     }
 
-    /// Encrypt RTP in place when SRTP is active; otherwise return unchanged.
+    // Encrypt RTP in place when SRTP is active; otherwise return unchanged
     async fn encrypt_rtp(&mut self, mut rtp_packet: RtpPacket) -> Result<RtpPacket> {
         if let Some(crypto) = self.state.crypto.as_mut() {
             let roc = crypto.update_roc(rtp_packet.data()).await;
@@ -3319,7 +3343,7 @@ impl AudioStreamSenderLocal {
         }
     }
 
-    /// Try to recover a leftover fax TIFF into a PDF and signal completion in Redis.
+    // Try to recover a leftover fax TIFF into a PDF and signal completion in Redis
     async fn check_fax(&self) {
         if self.state.fax.is_some()
             && tokio::fs::try_exists(PathBuf::from(format!(
@@ -3388,7 +3412,8 @@ pub struct AudioStreamSenderRemote {
 }
 
 impl AudioStreamSenderRemote {
-    /// Create a remote audio sender bound to a specific IP; used when sending from another host.
+
+    // Create a remote audio sender bound to a specific IP; used when sending from another host
     pub fn new(
         id: Uuid,
         rtpmap: Rtpmap,
@@ -3415,7 +3440,7 @@ impl AudioStreamSenderRemote {
         })
     }
 
-    /// Forward RPC to the remote audio stream via media RPC.
+    // Forward RPC to the remote audio stream via media RPC
     async fn process_rpc_msg(&self, rpc_msg: RpcMessage) -> Result<()> {
         MEDIA_SERVICE
             .media_rpc_client
@@ -3434,7 +3459,8 @@ pub enum StreamSender {
 }
 
 impl StreamSender {
-    /// Build a sender for this stream. Chooses local vs remote and audio vs video, negotiates crypto if needed.
+
+    // Build a sender for this stream. Chooses local vs remote and audio vs video, negotiates crypto if needed
     async fn new(
         id: Uuid,
         sender: UnboundedSender<StreamSenderMessage>,
@@ -3457,7 +3483,7 @@ impl StreamSender {
             .ok_or(anyhow!("no reomte media"))?;
         let rtpmap = offer_media
             .negotiate_rtpmap(&answer_media)
-            .ok_or(anyhow!("no rtpmap"))?;
+            .ok_or(anyhow!("no rtmap"))?;
         let ptime = answer_media.ptime();
 
         if offer_media.media_type == MediaType::Video {
@@ -3617,7 +3643,8 @@ impl StreamSender {
         }
     }
 
-    /// Main loop for a single sender. Prioritizes RTP preparation, handles RTP/RTCP/recording, and reacts to RPCs.
+    // This is main loop for a single sender
+    // Prioritizes RTP preparation, handles RTP/RTCP/recording and reacts to RPCs
     pub async fn process_packets(
         id: Uuid,
         sender_runtime: Arc<Runtime>,
@@ -3664,7 +3691,7 @@ impl StreamSender {
         }
     }
 
-    /// Per-stream sender loop. Prioritizes PrepareRtpPacket, handles RTP/RTCP/feedback/recording, and exits on stop.
+    // Per-stream sender loop. Prioritizes PrepareRtpPacket, handles RTP/RTCP/feedback/recording and exits on stop
     async fn do_process_packets(
         &mut self,
         id: Uuid,
@@ -3895,7 +3922,7 @@ impl StreamSender {
         Ok(())
     }
 
-    /// Route RPCs to the appropriate variant (audio/video, local/remote) and apply changes.
+    // Route RPCs to the appropriate variant (audio/vieo, local/remote) and apply changes
     async fn process_rpc_msg(
         &mut self,
         rpc_msg: RpcMessage,
@@ -3937,18 +3964,17 @@ impl StreamSender {
         Ok(())
     }
 
-    /// Handle inbound-recording packets:
-    /// - AudioRemote: tag packet (dst UUID in RTP ext) and forward to remote recording UDP.
-    /// - AudioLocal: if fax is T.38 and packet isn't RTP → hand to UDPTL; else feed local.receive_rtp.
-    ///   Then decode payload to PCM off-thread; fan out to file recorder and stream recording (resample if needed, skip when paused).
-    /// - Video*: ignored.
+    // Handle inbound-recording packets
+    // - AudioRemote: tag packet (dst UUID in RTP ext) and forward to remote recording UDP
+    // - Audiolocal: if fax is T.38 and packet isn't RTP - hand to UDPTL; else feed local.receive_rtp
+    // Then decode payload to PCM off-thread; fan out to file recorder and stream recording
+    // - Video*: ignored
     async fn process_inbound_recording(
         &mut self,
         rtp_packet: Vec<u8>,
     ) -> Result<()> {
         match self {
             StreamSender::AudioRemote(remote) => {
-                // Attach destination UUID for demux, then forward to remote recording port.
                 let rtp_packet =
                     RtpPacket::set_extension(&rtp_packet, remote.id.as_bytes());
                 remote
@@ -3968,14 +3994,14 @@ impl StreamSender {
                         .await?;
                         let rtp_packet = rtp_packet.clone();
                         if is_t38 && !RtpPacket::is_valid(&rtp_packet) {
-                            // UDPTL (fax) path: non-RTP, let fax stack consume it.
+                            // UDPTL ( fax ) path:non-RTP, let fax stack consume it
                             nebula_task::spawn_task(move || {
                                 fax.lock().process_udptl(&rtp_packet)
                             })
                             .await?;
                             return Ok(());
                         } else {
-                            // Normal RTP: feed into local audio sender.
+                            // Normal RTP: feed into local audio sender
                             local.receive_rtp(uuid, rtp_packet.clone()).await?;
                         }
                     }
@@ -4027,7 +4053,7 @@ impl StreamSender {
         Ok(())
     }
 
-    /// Handle TCC feedback for video: feed acks to GoogCC; if target send rate changes, update Redis and notify switchboard.
+    // Handle TCC feedback for video: feed acks to GoogCC; if target send rate changes, update Redis and notify switchboard
     async fn process_transportcc(
         &mut self,
         cc: TransportLayerCc,
@@ -4062,7 +4088,7 @@ impl StreamSender {
         Ok(())
     }
 
-    /// Sender-side RTCP handler (video): ignore empty triggers, SRTP-encrypt if needed, and forward via transport.
+    // Sender-side RTCP handler (video); ignore empty triggers, SRTP-encrypt if needed, and forward via transport
     async fn receive_rtcp(&mut self, mut rtcp_packet: Vec<u8>) -> Result<()> {
         match self {
             StreamSender::AudioRemote(_remote) => {}
@@ -4154,7 +4180,8 @@ struct ForwardState {
 }
 
 impl ForwardState {
-    /// Initialize per-source VP8 forwarding state with an RTP template and zeroed rewrite ids.
+
+    // Initialize per-source VP8 forwarding state with RTP template and zeroed rewrite ids
     fn new(src: Uuid, pt: u8) -> Self {
         let mut rtp_packet = RtpPacket::new();
         rtp_packet.set_ssrc(src.as_fields().0);
@@ -4194,7 +4221,8 @@ pub struct VideoStreamSenderLocal {
 }
 
 impl VideoStreamSenderLocal {
-    /// Initialize a local video sender: set up GoogCC, RTX, (optional) SRTP, and transport; store room/channel.
+
+    // Initialize a local video sender: set up GoogCC, RTX, SRTP and transport; store room/channel
     pub async fn new(
         uuid: Uuid,
         channel: String,
@@ -4230,11 +4258,11 @@ impl VideoStreamSenderLocal {
         }
     }
 
-    /// Rewrite incoming VP8 to our local continuity:
-    /// - parse VP8 header (picture_id/tl0)
-    /// - expand truncated counters and compute offsets per source
-    /// - build outgoing RTP with rewritten seq/timestamp/picture_id/tl0
-    /// - remember original for RTX and send
+    // Rewrite incoming VP8 to our local continuity
+    // - parse VP8 header (picture_id/tl0)
+    // - expand truncated counters and compute offsets per source
+    // - build outgoing RTP with rewritten seq/timestamp/picture_id/tl0
+    // - remember original for RTX and send
     async fn receive_rtp(
         &mut self,
         src_uuid: Uuid,
@@ -4324,7 +4352,7 @@ impl VideoStreamSenderLocal {
             outgoing.tl0_pic_idx as TruncatedTl0PicIdx,
         );
 
-        self
+                self
             .rtx_sender
             .remember_sent(Bytes::copy_from_slice(out_rtp_packet.data()), Instant::now());
 
@@ -4333,7 +4361,8 @@ impl VideoStreamSenderLocal {
         Ok(())
     }
 
-    /// Send a single RTP packet for video. Writes TCC seq, encrypts if SRTP, transmits, and records rate.
+    // Send a single RTP packet for video
+    // Writes TCC seq, encrypts if SRTP, transmits and records rate
     async fn send_rtp_packet(&mut self, mut rtp_packet: RtpPacket) -> Result<()> {
         self.tcc_seq += 1;
         let extension_offset = RtpPacket::extension_offset(rtp_packet.data());
@@ -4401,7 +4430,7 @@ impl VideoStreamSenderLocal {
         Ok(())
     }
 
-    /// Handle NACKs for missing video packets: use cached originals to build RTX packets and resend.
+    // Handle NACKs for missing video packets: use cached originals to build RTX packets and resend.
     async fn process_transportnack(
         &mut self,
         nack: TransportLayerNack,
@@ -4421,7 +4450,6 @@ impl VideoStreamSenderLocal {
         Ok(())
     }
 
-    /// React to video RPCs: on DtlsDone load SRTP; on SetPeerAddr update transport destination.
     async fn process_rpc_msg(&mut self, rpc_msg: RpcMessage) -> Result<()> {
         match &rpc_msg.method {
             RpcMethod::DtlsDone => {
@@ -4455,7 +4483,9 @@ pub struct VideoStreamSenderRemote {
 }
 
 impl VideoStreamSenderRemote {
-    /// Create a remote video sender for the chosen IP. Prepares sockets/addresses and SRTP context.
+
+    // Create a remote video sender for the chosen IP.
+    // Prepares sockets/addresses and SRTP context
     pub fn new(
         uuid: Uuid,
         rtpmap: Rtpmap,
@@ -4540,7 +4570,8 @@ pub struct IncomingVideoState {
 }
 
 impl IncomingVideoState {
-    /// Create a fresh state tracker for an incoming SSRC.
+
+    // Create a fresh state tracker for an incoming SSRC
     pub fn new(ssrc: u32) -> Self {
         Self {
             ssrc,
@@ -4569,18 +4600,18 @@ impl DataRateTracker {
     const MAX_DURATION: Duration = Duration::from_millis(5000);
     const MIN_DURATION: Duration = Duration::from_millis(500);
 
-    /// Latest bits/sec estimate over a recent window (if enough data).
+    // Latest bits/sec estimate over a recent window (if enough data)
     fn rate(&self) -> Option<u64> {
         self.rate
     }
 
-    /// Add a new observation (in bits) at the given time; call update() to refresh the estimate.
+    /// Append a sample ( bits, time ). Stale entries are evicted in update(now), not here
     fn push(&mut self, size: u64, time: Instant) {
         self.history.push_front((time, size));
         self.accumulated_size += size;
     }
 
-    /// Drop old samples and recompute the rate over the remaining window.
+    // Drop old samples and recompute the rate over the remaining window
     fn update(&mut self, now: Instant) {
         let deadline = now - Self::MAX_DURATION;
         let count_to_remove = self
@@ -4777,8 +4808,8 @@ impl VideoStreamReceiver {
             })
     }
 
-    /// Main per-packet video path. Decrypts if needed, updates layers and RID/TCC, handles RTX, and forwards.
-    /// Video receiver RTP handler: decrypt (if SRTP), handle RTX recovery and RID/TCC, update layers, and forward.
+    // Main per-packet video path. Decrypts if needed, updates layers and RID/TCC, hanles RTX, and forwards
+    // Video receiver RTP handler: decrypts (if SRTP), handle RTX recovery and RID/TCC, update layers, and forward
     async fn receive_rtp_packet(
         &mut self,
         mut rtp_packet: Vec<u8>,
@@ -4983,7 +5014,8 @@ impl VideoStreamReceiver {
             16,
         );
         ssrc_state.nack_sender.remember_received(full_seqnum);
-        let pkt = Bytes::from(rtp_packet.clone());
+
+        let packet = Bytes::from(rtp_packet.clone());
         for (destination, state) in self.destination_layers.iter_mut() {
             match state {
                 VideoSwitchState::Switched(r) => {
@@ -4991,7 +5023,7 @@ impl VideoStreamReceiver {
                         let msg = StreamSenderPoolMessage::RtpPacket(
                             self.id,
                             *destination,
-                            pkt.clone(),
+                            packet.clone(),
                         );
                         let _ = self.stream_sender_pool.send(msg);
                     }
@@ -5001,14 +5033,14 @@ impl VideoStreamReceiver {
                         let msg = StreamSenderPoolMessage::RtpPacket(
                             self.id,
                             *destination,
-                            pkt.clone(),
+                            packet.clone(),
                         );
                         let _ = self.stream_sender_pool.send(msg);
                     } else if &rid == to && is_key_frame {
                         let msg = StreamSenderPoolMessage::RtpPacket(
                             self.id,
                             *destination,
-                            pkt.clone(),
+                            packet.clone(),
                         );
                         let _ = self.stream_sender_pool.send(msg);
                         *state = VideoSwitchState::Switched(to.clone());
@@ -5022,7 +5054,7 @@ impl VideoStreamReceiver {
         Ok(())
     }
 
-    /// Compute and send NACKs for missing sequence numbers, rate-limited by NACK_CALCULATION_INTERVAL.
+    // Compute and send NACKs for missing sequence numbers, rate-limited by NACK_CALCULATION_INTERVAL
     fn send_nacks(&mut self, now: Instant) -> Result<()> {
         if let Some(nacks_sent) = self.nacks_sent {
             if now < nacks_sent + NACK_CALCULATION_INTERVAL {
@@ -5055,7 +5087,7 @@ impl VideoStreamReceiver {
         Ok(())
     }
 
-    /// Switch which RID a destination receives. If switching, wait for a keyframe before finalizing.
+    // Switch which RID a destination receives. If switching, wait for a keyframe before finalizing
     fn update_destination_layer(
         &mut self,
         layer: RpcVideoDestinationLayer,
@@ -5137,7 +5169,7 @@ impl VideoStreamReceiver {
         Ok(())
     }
 
-    /// Store current allocations and expose them by SSRC; report to switchboard if in a room.
+    // Store current allocations and expose them by SSRC; report to switchboard if in a room
     fn update_allocated_videos(
         &mut self,
         allocated_videos: HashMap<Uuid, AllocatedVideo>,
@@ -5167,7 +5199,7 @@ impl VideoStreamReceiver {
         }
     }
 
-    /// Update which inbound layers are allocated to this destination, optionally forcing a refresh.
+    // UPdate which inbound layers are allocated to this destination, optionally forcing a refresh
     async fn allocate_layers(&mut self, force: bool) -> Result<()> {
         if !force
             && self
@@ -5243,7 +5275,7 @@ pub struct VideoStreamSource {
 }
 
 impl VideoStreamSource {
-    /// Decide which layers each source should send to this destination and notify if it changed.
+    // Decide which layers each source should send to this destination and notify if it changed
     async fn allocate_layers(
         &self,
         allocated_videos: HashMap<Uuid, AllocatedVideo>,
@@ -5304,7 +5336,7 @@ impl VideoStreamSource {
         Ok(())
     }
 
-    /// Load the current set of candidate sources and their requested sizes and flags.
+    
     async fn retrieve_sources(&self) -> Result<HashMap<Uuid, VideoSourceState>> {
         let key = format!("nebula:media_stream:{}:sources", self.id);
         let sources: Vec<String> = REDIS.smembers(&key).await?;
@@ -5354,7 +5386,6 @@ impl VideoStreamSource {
         Ok(source_states)
     }
 
-    /// Given live sources and bandwidth, pick the best layer per source.
     async fn calculate_allocations(
         &self,
         source_states: HashMap<Uuid, VideoSourceState>,
@@ -5390,7 +5421,6 @@ impl VideoStreamSource {
         Self::loop_allocatoins(sources, available_rate)
     }
 
-    /// Sort sources by screen-share first, then by key speaker, then by requested size.
     fn sort_video_sources(sources: &mut [(Uuid, VideoSourceState)]) {
         sources.sort_by_key(|(src, state)| {
             std::cmp::Reverse((
@@ -5402,7 +5432,6 @@ impl VideoStreamSource {
         });
     }
 
-    /// Greedy allocator that respects available_rate and prefers not to downshift quality.
     fn loop_allocatoins(
         mut sources: Vec<(Uuid, VideoSourceState)>,
         available_rate: u64,
@@ -5488,7 +5517,7 @@ impl VideoStreamSource {
     }
 }
 
-/// Read the chosen IP for sending a video stream (set by the receiver side).
+// Read the chosen IP for sending a video stream (set by the receiver side)
 async fn get_video_send_ip(id: &str) -> String {
     let ip: String = REDIS
         .hget(&format!("nebula:media_stream:{}", id), "ip")
@@ -5497,7 +5526,7 @@ async fn get_video_send_ip(id: &str) -> String {
     ip
 }
 
-/// Pick a live IP to send from; falls back to our local IP and registers it.
+// Pick a live IP to send from : falls back to our local    IP and registers it
 async fn get_send_ip(
     id: &str,
     monitor: &RemoteStreamSenderMonitor,
@@ -5526,7 +5555,7 @@ async fn get_send_ip(
     Ok(MEDIA_SERVICE.local_ip.clone())
 }
 
-/// Try to find a matching SRTP crypto suite between local and remote media.
+//Try to find a matching SRTP crypto suite between local and remote media 
 async fn negotiate_crypto(
     stream_id: &str,
     local_media: &MediaDescription,
@@ -5559,7 +5588,7 @@ async fn negotiate_crypto(
     None
 }
 
-/// Persist SRTP crypto parameters for a stream in Redis.
+// Persist SRTP crypto parameters for a stream in Redis
 pub async fn set_crypto(kind: CryptoKind, id: &str, crypto: &Crypto) -> Result<()> {
     REDIS
         .hsetex(
@@ -5571,7 +5600,7 @@ pub async fn set_crypto(kind: CryptoKind, id: &str, crypto: &Crypto) -> Result<(
     Ok(())
 }
 
-/// Load SRTP crypto parameters for a stream from Redis.
+// Load SRTP crypto parameters for a stream from Redis
 async fn get_crypto(kind: CryptoKind, id: &str) -> Option<CryptoContext> {
     let crypto: String = REDIS
         .hget(&format!("nebula:media_stream:{}", id), &kind.to_string())
@@ -5588,16 +5617,16 @@ async fn get_crypto(kind: CryptoKind, id: &str) -> Option<CryptoContext> {
     .ok()
 }
 
-/// Fetch the local SSRC we assigned for this stream (if any).
-async fn get_local_ssrc(id: &str) -> Option<u32> {
-    let ssrc: u32 = REDIS
-        .hget(&format!("nebula:media_stream:{}", id), "local_ssrc")
-        .await
-        .ok()?;
-    Some(ssrc)
-}
+// async fn get_local_ssrc(id: &str) -> Option<u32> {
+//     let ssrc: u32 = REDIS
+//         .hget(&format!("nebula:media_stream:{}", id), "local_ssrc")
+//         .await
+//         .ok()?;
+//     Some(ssrc)
+// }
 
-/// Fetch the negotiated incoming SSRC for this stream (if any).
+
+// Get the netgotiated incoming SSRC for this stream
 async fn get_ssrc(id: &str) -> Option<u32> {
     let ssrc: u32 = REDIS
         .hget(&format!("nebula:media_stream:{}", id), "ssrc")
@@ -5606,7 +5635,7 @@ async fn get_ssrc(id: &str) -> Option<u32> {
     Some(ssrc)
 }
 
-/// Get the media description by SDP direction (Offer/Answer).
+// Get the media description by SDP direction (Offer/Answer)
 async fn get_media_by_directoin(
     direction: SdpType,
     id: &str,
@@ -5621,7 +5650,7 @@ async fn get_media_by_directoin(
     MediaDescription::from_str(&media_string).ok()
 }
 
-/// Get the media description by kind (Local/Remote) from Redis.
+// Get the media description by kind (local/remote) from Redis
 async fn get_media(kind: MediaDescKind, id: &str) -> Option<MediaDescription> {
     let media_string: String = REDIS
         .hget(&format!("nebula:media_stream:{}", id), &kind.to_string())
@@ -5630,7 +5659,7 @@ async fn get_media(kind: MediaDescKind, id: &str) -> Option<MediaDescription> {
     MediaDescription::from_str(&media_string).ok()
 }
 
-/// Save and broadcast the updated peer IP:port for a stream.
+// Save and broadcast the updated peer IP: port for a stream
 pub async fn set_peer_addr(
     id: &str,
     peer_ip: Ipv4Addr,
@@ -5647,7 +5676,7 @@ pub async fn set_peer_addr(
     Ok(())
 }
 
-/// Resolve the current peer address for a stream; defaults to 127.0.0.1:50000.
+// Recolve the current peer address for a stream; defaults to `127.0.0.1:5000`
 async fn get_peer_addr(id: &str) -> Result<SocketAddr> {
     let addr: String = REDIS
         .hget(&format!("nebula:media_stream:{}", id), "peer_addr")
@@ -5657,7 +5686,7 @@ async fn get_peer_addr(id: &str) -> Result<SocketAddr> {
         .map_err(|e| anyhow!(e))
 }
 
-/// Mix two PCM samples with soft clipping to avoid distortion.
+// Mix two PCM samples with soft clipping to avaoid distortion
 pub fn mix(x: i16, y: i16) -> i16 {
     let buf = x as f64 + y as f64;
     (if buf > ACTUAL_THRESHOLD {
@@ -5669,14 +5698,14 @@ pub fn mix(x: i16, y: i16) -> i16 {
     }) as i16
 }
 
-/// Soft-clip helper for mixing; bends peaks smoothly.
+// Soft-clip helper for mixing; bends peaks smoothly
 fn mix_normalization(x: f64) -> f64 {
     let a = (1.0 - THRESHOLD) / (1.0 + ALPHA).ln();
     let b = ALPHA / (2.0 - THRESHOLD);
     THRESHOLD + a * (1.0 + b * (x - THRESHOLD)).ln()
 }
 
-/// Map a DTMF character to its event code.
+// Map a DTMF character to its event code
 fn dtmf_byte(dtmf: &str) -> Option<u8> {
     for (i, v) in DTMF_DIGITS.iter().enumerate() {
         if &dtmf == v {
@@ -5686,7 +5715,7 @@ fn dtmf_byte(dtmf: &str) -> Option<u8> {
     None
 }
 
-/// Report the current video allocations (RID/SSRC/size/rate) to switchboard.
+// Report the current video alllocations (RID/SSRC/size/rate) to switchboard
 async fn report_video_allocations(
     member: String,
     room: String,
@@ -5720,7 +5749,7 @@ async fn report_video_allocations(
         .await;
 }
 
-/// Receive next stream message with a timeout; errors if the channel is gone.
+// Receiive next stream message with a timeout, errors if the channel is gone
 async fn receive_msg(
     receiver: &mut UnboundedReceiver<StreamReceiverMessage>,
     redis_key: &str,
@@ -5742,7 +5771,7 @@ async fn receive_msg(
     Ok(Some(msg))
 }
 
-/// Construct a LAME MP3 encoder with the given sample rate and channels.
+// Construct a lame-mp3-encoder with the given sample rate and channels
 async fn new_lame(rate: u32, channel: u8) -> Result<Arc<BlockMutex<Lame>>> {
     nebula_task::spawn_task(move || -> Result<Arc<BlockMutex<Lame>>> {
         let mut lame = Lame::new()?;
@@ -5769,7 +5798,8 @@ pub struct VideoStreamDestination {
 }
 
 impl VideoStreamDestination {
-    /// Build a destination peer for video (peer-to-peer). Negotiates RTP map and SRTP, sets up transport.
+
+    // Build a destination peer for video (peer-to-peer). Negotiates RTP map and SRTP, sets up transport
     async fn new(
         uuid: Uuid,
         channel: String,
@@ -5795,7 +5825,7 @@ impl VideoStreamDestination {
                 .ok_or(anyhow!("no local media"))?;
             let remote_media = get_media(MediaDescKind::Remote, &id)
                 .await
-                .ok_or(anyhow!("no remote media"))?;
+                .ok_or(anyhow!("no reomte media"))?;
             negotiate_crypto(&id, &local_media, &remote_media)
                 .await
                 .map(|r| r.0)
@@ -5835,7 +5865,7 @@ impl VideoStreamDestination {
         })
     }
 
-    /// Send a decoded video frame: encode (if available), packetize to RTP, mark last, encrypt if SRTP, and transmit.
+    // Send a decoded video frame: encode(if available), packetize to RTP, mark last, encrypt if SRTP and transmit
     async fn send_frame(&mut self, frame: ffmpeg_next::frame::Video) -> Result<()> {
         if self.webrtc && self.crypto.is_none() {
             // if webrtc but crypto hasn't been initiated, we halt the video sending
@@ -5886,7 +5916,7 @@ impl VideoStreamDestination {
         }
     }
 
-    /// React to video RPCs for the destination (DTLS done, peer address changes, keyframe requests).
+    // React to video RPCs for the destination (DTLS done, peer addr changes, keyframe request)
     async fn process_rpc_msg(&mut self, rpc_msg: RpcMessage) -> Result<()> {
         match &rpc_msg.method {
             RpcMethod::DtlsDone => {

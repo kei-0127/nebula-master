@@ -47,6 +47,7 @@ use tokio::sync::mpsc::{
     channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
 use tokio::{self, time::Duration};
+use bytes::Bytes;
 
 // Audio processing constants
 const THRESHOLD: f64 = 0.6;                    // Silence detection threshold
@@ -138,7 +139,7 @@ pub enum SessionPoolMessage {
         port: u16,
         peer_ip: Ipv4Addr,
         peer_port: u16,
-        packet: Vec<u8>,
+        packet: Bytes,
         now: Instant,
     },
     /// Indicates a session has finished; remove its sender from the pool.
@@ -202,7 +203,7 @@ impl NewSessionPool {
                                 port,
                                 peer_ip,
                                 peer_port,
-                                packet: buf[..n].to_vec(),
+                                packet: Bytes::copy_from_slice(&buf[..n]),
                                 now: Instant::now(),
                             });
                         }
@@ -299,7 +300,7 @@ impl NewSessionPool {
                         if let Some(sender) = self.sessions.get(&session_id) {
                             if sender
                                 .send(StreamReceiverMessage::Packet(
-                                    packet.clone(),
+                                    packet,
                                     now,
                                 ))
                                 .is_ok()
@@ -309,8 +310,8 @@ impl NewSessionPool {
                         }
 
                         let (sender, receiver) = unbounded_channel();
-                        let _ =
-                            sender.send(StreamReceiverMessage::Packet(packet, now));
+                        let _ = sender
+                            .send(StreamReceiverMessage::Packet(packet, now));
                         self.sessions.insert(session_id.clone(), sender.clone());
                         let stream_sender_pool = self.stream_sender_pool.clone();
                         let session_pool_sender = session_pool_sender.clone();

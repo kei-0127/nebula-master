@@ -90,7 +90,7 @@ impl Ipv4Packet {
 
     // Set Time-To-Live for the IPv4 packet
     pub fn set_ttl(&mut self, val: u8) {
-        let co: usize = 8;
+        let co = 8;
         self.inner[co + 0] = val;
     }
 
@@ -389,7 +389,7 @@ impl RtpPacket {
     }
 
     // Write/replace a raw extension block (0xBEDE format-length header + padded data)
-    // Returns a new buffer with extension applied. Minimizes allocations/copies.
+     // Returns a new buffer with extension applied. Minimizes allocations/copies.
     pub fn set_extension(buffer: &[u8], data: &[u8]) -> Vec<u8> {
         let offset = (Self::get_csrc_count(buffer) * 4) as usize + RTP_HEADER_LEN;
         let old_ext_len = Self::get_extension_length(buffer);
@@ -513,5 +513,69 @@ impl RtpPacket {
                 .checked_add(ptime)
                 .unwrap_or(0),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_base_rtp_with_payload(payload: &[u8]) -> Vec<u8> {
+        let mut p = RtpPacket::new();
+        p.set_ssrc(0x11223344);
+        p.set_sequence(0x5566);
+        p.set_timestamp(0x77889900);
+        p.set_paylod(payload);
+        p.data().to_vec()
+    }
+
+    #[test]
+    fn set_extension_adds_header_and_sets_bit() {
+        let base = make_base_rtp_with_payload(&[9, 9, 9]);
+        assert_eq!(RtpPacket::get_extension_length(&base), 0);
+
+        // 3-byte payload, left-padded with 1 zero
+        let ext = [0xAB, 0xCD, 0xEF];
+        let out = RtpPacket::set_extension(&base, &ext);
+
+        assert!(RtpPacket::get_extension_bit(&out));
+
+        let off = RtpPacket::extension_offset(&out);
+        assert_eq!(out[off], 0xBE);
+        assert_eq!(out[off + 1], 0xDE);
+
+        let words = BigEndian::read_u16(&out[off + 2..off + 4]);
+        assert_eq!(words, 1);
+
+        let ext_len = RtpPacket::get_extension_length(&out);
+        let ext_data = &out[off + 4..off + ext_len];
+        assert_eq!(ext_data, &[0, 0xAB, 0xCD, 0xEF]);
+
+        let payload_off = RtpPacket::payload_offset(&out);
+        assert_eq!(&out[payload_off..], &[9, 9, 9]);
+
+        // Header fields intact
+        assert_eq!(RtpPacket::get_ssrc(&out), 0x11223344);
+        assert_eq!(RtpPacket::get_sequence(&out), 0x5566);
+        assert_eq!(RtpPacket::get_timestamp(&out), 0x77889900);
+    }
+
+    #[test]
+    fn set_extension_replaces_existing_extension() {
+        let base = make_base_rtp_with_payload(&[1, 2, 3, 4, 5]);
+
+        let out1 = RtpPacket::set_extension(&base, &[0x11, 0x22, 0x33, 0x44]); 
+        let out2 = RtpPacket::set_extension(&out1, &[0xAA, 0xBB]); 
+
+        let off = RtpPacket::extension_offset(&out2);
+        let words = BigEndian::read_u16(&out2[off + 2..off + 4]);
+        assert_eq!(words, 1);
+        let ext_len = RtpPacket::get_extension_length(&out2);
+        let ext_data = &out2[off + 4..off + ext_len];
+        assert_eq!(ext_data, &[0, 0, 0xAA, 0xBB]);
+
+        // Payload preserved
+        let payload_off = RtpPacket::payload_offset(&out2);
+        assert_eq!(&out2[payload_off..], &[1, 2, 3, 4, 5]);
     }
 }
