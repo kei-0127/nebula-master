@@ -43,6 +43,7 @@ use std::{
 };
 
 use byteorder::{BigEndian, ByteOrder};
+use bytes::Bytes;
 
 use crate::{
     packet::RtpPacket,
@@ -68,7 +69,7 @@ pub struct RtxSender {
     // The key includes SSRC because we handle multiple SSRCs simultaneously
     // Sequence number is truncated because NACKs use truncated sequence numbers
     previously_sent_by_seqnum:
-        TwoGenerationCache<(Ssrc, TruncatedSequenceNumber), Vec<u8>>,
+        TwoGenerationCache<(Ssrc, TruncatedSequenceNumber), Bytes>,
     
     // Next outgoing sequence number for each RTX SSRC
     // Each original SSRC gets its own RTX SSRC with independent sequence numbering
@@ -80,6 +81,7 @@ impl RtxSender {
     ///
     /// The cache duration determines how long packets are kept for potential retransmission.
     /// Longer durations allow for more retransmissions but use more memory.
+    /// 
     pub fn new(limit: Duration) -> Self {
         Self {
             previously_sent_by_seqnum: TwoGenerationCache::new(
@@ -120,7 +122,7 @@ impl RtxSender {
     /// # Arguments
     /// * `outgoing` - The packet data that was sent
     /// * `departed` - The timestamp when the packet was sent
-    pub fn remember_sent(&mut self, outgoing: Vec<u8>, departed: Instant) {
+    pub fn remember_sent(&mut self, outgoing: Bytes, departed: Instant) {
         let ssrc = RtpPacket::get_ssrc(&outgoing);
         let seq = RtpPacket::get_sequence(&outgoing);
         self.previously_sent_by_seqnum.insert(
@@ -208,20 +210,25 @@ fn to_rtx_ssrc(ssrc: Ssrc) -> Ssrc {
 /// # Returns
 /// * `Vec<u8>` - The RTX packet data
 fn packet_to_rtx(packet: &[u8], ssrc: u32, seq: u16) -> Vec<u8> {
-    // Extract original sequence number and payload
-    let original_seq = RtpPacket::get_sequence(packet);
-    let mut new_payload = vec![0, 0];
-    
-    // Prepend original sequence number to payload (RFC 4588)
-    BigEndian::write_u16(&mut new_payload, original_seq);
-    new_payload.extend_from_slice(RtpPacket::get_payload(packet));
+    // Compute lengths
+    let payload = RtpPacket::get_payload(packet);
+    let payload_offset = RtpPacket::payload_offset(packet);
+    let new_payload_len = 2 + payload.len();
+    let mut new_packet = Vec::with_capacity(payload_offset + new_payload_len);
 
-    // Create new packet with RTX modifications
-    let mut new_packet = packet.to_vec();
+    // Copy header+extensions as-is
+    new_packet.extend_from_slice(&packet[..payload_offset]);
+
+    // Write new sequence and SSRC directly into header region
     RtpPacket::buffer_set_sequence(&mut new_packet, seq);
     RtpPacket::set_packet_ssrc(&mut new_packet, ssrc);
-    RtpPacket::buffer_set_paylod(&mut new_packet, &new_payload);
-    // Note: We preserve payload type, timestamp, and marker bit from the original.
-    // If a distinct RTX payload type is required, the caller/upstream must set it.
+
+    // Build new payload with original seq prefix (RFC 4588)
+    let original_seq = RtpPacket::get_sequence(packet);
+    new_packet.extend_from_slice(&[0, 0]);
+    let end = new_packet.len();
+    BigEndian::write_u16(&mut new_packet[end - 2..end], original_seq);
+    new_packet.extend_from_slice(payload);
+
     new_packet
 }

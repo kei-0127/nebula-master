@@ -90,7 +90,7 @@ impl Ipv4Packet {
 
     // Set Time-To-Live for the IPv4 packet
     pub fn set_ttl(&mut self, val: u8) {
-        let co = 8;
+        let co: usize = 8;
         self.inner[co + 0] = val;
     }
 
@@ -389,24 +389,41 @@ impl RtpPacket {
     }
 
     // Write/replace a raw extension block (0xBEDE format-length header + padded data)
-    // Returns a new buffer with extension applied.
+    // Returns a new buffer with extension applied. Minimizes allocations/copies.
     pub fn set_extension(buffer: &[u8], data: &[u8]) -> Vec<u8> {
         let offset = (Self::get_csrc_count(buffer) * 4) as usize + RTP_HEADER_LEN;
-        let extension_length = Self::get_extension_length(buffer);
-        let mut new = buffer[..offset].to_vec();
-        let new_extension_length = (data.len() as f64 / 4.0).ceil() as u16;
-        new.extend_from_slice(&[0, 0, 0, 0]);
-        BigEndian::write_u16(&mut new[offset + 2..], new_extension_length);
-        let mut data = data.to_vec();
-        if data.len() < new_extension_length as usize * 4 {
-            for _i in 0..new_extension_length as usize * 4 - data.len() {
-                data.insert(0, 0);
-            }
+        let old_ext_len = Self::get_extension_length(buffer);
+
+        // New extension length (in 32-bit words) and padded byte length
+        let new_ext_words = ((data.len() + 3) / 4) as u16;
+        let padded_len = new_ext_words as usize * 4;
+
+        // Capacity: original len - old extension + new header(4) + padded data
+        let mut out = Vec::with_capacity(
+            buffer.len() - old_ext_len + RTP_EXTENSIONS_HEADER_LEN + padded_len,
+        );
+
+        // 1) Copy header + CSRCs up to extension offset
+        out.extend_from_slice(&buffer[..offset]);
+
+        // 2) Write 0xBEDE + length (words)
+        out.extend_from_slice(&[0xBE, 0xDE, 0, 0]);
+        let hdr_len_pos = out.len() - 2; // last two bytes we just appended
+        BigEndian::write_u16(&mut out[hdr_len_pos..hdr_len_pos + 2], new_ext_words);
+
+        // 3) Left-pad with zeros to multiple of 32 bits, then append data
+        let pad = padded_len - data.len();
+        if pad > 0 {
+            out.extend(std::iter::repeat(0u8).take(pad));
         }
-        new.extend_from_slice(&data);
-        new.extend_from_slice(&buffer[offset + extension_length..]);
-        new[0] |= 1 << 4;
-        new
+        out.extend_from_slice(data);
+
+        // 4) Append the remainder after the old extension block
+        out.extend_from_slice(&buffer[offset + old_ext_len..]);
+
+        // Ensure extension bit is set
+        out[0] |= EXTENSION_BIT;
+        out
     }
 
     // Return a slice of the raw extension data (excluding 0xBEDE + header size)

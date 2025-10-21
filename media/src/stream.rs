@@ -46,7 +46,7 @@ use std::time::{self, Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use codec::dtmf::{DtmfDecoder, Tone};
 use codec::h264::H264;
 use codec::vp8::{PixelSize, TruncatedPictureId, TruncatedTl0PicIdx};
@@ -175,7 +175,7 @@ pub enum StreamReceiverMessage {
 }
 
 pub enum StreamSenderMessage {
-    RtpPacket(Uuid, Vec<u8>),
+    RtpPacket(Uuid, Bytes),
     RtcpPacket(Vec<u8>),
     Rpc(RpcMessage, RpcSource),
     InboundRecording(Vec<u8>),
@@ -187,7 +187,7 @@ pub enum StreamSenderMessage {
 
 #[derive(Clone)]
 pub enum StreamSenderPoolMessage {
-    RtpPacket(Uuid, Uuid, Vec<u8>),
+    RtpPacket(Uuid, Uuid, Bytes),
     RtcpPacket(Uuid, Vec<u8>),
     Rpc(Uuid, RpcMessage),
     InboundRecording(Uuid, Vec<u8>),
@@ -384,6 +384,7 @@ impl MediaStreamReceiver {
                 };
                 match msg {
                     StreamReceiverMessage::Packet(packet, _) => {
+                        let packet = Bytes::from(packet);
                         for destination in &destinations {
                             let msg = StreamSenderPoolMessage::RtpPacket(
                                 uuid,
@@ -755,7 +756,11 @@ impl AudioStreamSenderPool {
             let mut buf = [0; 5000];
             loop {
                 if let Ok(n) = remote_rtp_udp.recv(&mut buf).await {
-                    let packet = buf[..n].to_vec();
+                    let mut tmp = BytesMut::with_capacity(1500);
+                    tmp.resize(5000, 0);
+                    tmp[..n].copy_from_slice(&buf[..n]);
+                    tmp.truncate(n);
+                    let packet = tmp.freeze();
                     if let Some(ext) = RtpPacket::get_extension(&packet) {
                         if ext.len() == 32 {
                             let (src, dst) = ext.split_at(16);
@@ -793,7 +798,7 @@ impl AudioStreamSenderPool {
             let remote_rtcp_udp = self.remote_rtcp_udp.clone();
             let sender = self.sender.clone();
             tokio::spawn(async move {
-                let mut buf = [0; 5000];
+            let mut buf = [0; 5000];
                 loop {
                     if let Ok(n) = remote_rtcp_udp.recv(&mut buf).await {
                         let (uuid, packet) = buf[..n].split_at(16);
@@ -801,7 +806,7 @@ impl AudioStreamSenderPool {
                             let _ =
                                 sender.send(StreamSenderPoolMessage::RtcpPacket(
                                     uuid,
-                                    packet.to_vec(),
+                                packet.to_vec(),
                                 ));
                         }
                     }
@@ -815,12 +820,16 @@ impl AudioStreamSenderPool {
             let mut buf = [0; 5000];
             loop {
                 if let Ok(n) = recording_udp.recv(&mut buf).await {
-                    let packet = buf[..n].to_vec();
+                    let mut tmp = BytesMut::with_capacity(1500);
+                    tmp.resize(5000, 0);
+                    tmp[..n].copy_from_slice(&buf[..n]);
+                    tmp.truncate(n);
+                    let packet = tmp.freeze();
                     if let Some(ext) = RtpPacket::get_extension(&packet) {
                         if let Ok(uuid) = Uuid::from_slice(ext) {
                             let _ = sender.send(
                                 StreamSenderPoolMessage::InboundRecording(
-                                    uuid, packet,
+                                    uuid, packet.to_vec(),
                                 ),
                             );
                         }
@@ -1340,11 +1349,12 @@ impl AudioStreamReceiver {
                     self.destinations.as_ref().unwrap()
                 }
             };
+            let packet = Bytes::from(raw_rtp_packet.clone());
             for destination in destinations {
                 let msg = StreamSenderPoolMessage::RtpPacket(
                     self.id,
                     *destination,
-                    raw_rtp_packet.clone(),
+                    packet.clone(),
                 );
                 let _ = self.stream_sender_pool.send(msg);
             }
@@ -1450,11 +1460,12 @@ impl AudioStreamReceiver {
                 self.destinations.as_ref().unwrap()
             }
         };
+            let packet = Bytes::from(raw_rtp_packet);
         for destination in destinations {
             let msg = StreamSenderPoolMessage::RtpPacket(
                 self.id,
                 *destination,
-                raw_rtp_packet.clone(),
+                packet.clone(),
             );
             let _ = self.stream_sender_pool.send(msg);
         }
@@ -1462,7 +1473,7 @@ impl AudioStreamReceiver {
             self.stream_sender_pool
                 .send(StreamSenderPoolMessage::InboundRecording(
                     self.id,
-                    raw_rtp_packet.clone(),
+                        packet.to_vec(),
                 ));
 
         if let Some(voicemail) = self.voicemail.as_mut() {
@@ -3801,7 +3812,7 @@ impl StreamSender {
                 match msg {
                     StreamSenderMessage::RtpPacket(src, packet) => {
                         last_timeout_check = now;
-                        let _ = self.receive_rtp(src, packet).await;
+                        let _ = self.receive_rtp(src, packet.to_vec()).await;
                     }
                     StreamSenderMessage::RtcpPacket(packet) => {
                         let _ = self.receive_rtcp(packet).await;
@@ -4313,8 +4324,9 @@ impl VideoStreamSenderLocal {
             outgoing.tl0_pic_idx as TruncatedTl0PicIdx,
         );
 
-        self.rtx_sender
-            .remember_sent(out_rtp_packet.data().to_vec(), Instant::now());
+        self
+            .rtx_sender
+            .remember_sent(Bytes::copy_from_slice(out_rtp_packet.data()), Instant::now());
 
         self.send_rtp_packet(out_rtp_packet).await?;
 
@@ -4971,7 +4983,7 @@ impl VideoStreamReceiver {
             16,
         );
         ssrc_state.nack_sender.remember_received(full_seqnum);
-
+        let pkt = Bytes::from(rtp_packet.clone());
         for (destination, state) in self.destination_layers.iter_mut() {
             match state {
                 VideoSwitchState::Switched(r) => {
@@ -4979,7 +4991,7 @@ impl VideoStreamReceiver {
                         let msg = StreamSenderPoolMessage::RtpPacket(
                             self.id,
                             *destination,
-                            rtp_packet.clone(),
+                            pkt.clone(),
                         );
                         let _ = self.stream_sender_pool.send(msg);
                     }
@@ -4989,14 +5001,14 @@ impl VideoStreamReceiver {
                         let msg = StreamSenderPoolMessage::RtpPacket(
                             self.id,
                             *destination,
-                            rtp_packet.clone(),
+                            pkt.clone(),
                         );
                         let _ = self.stream_sender_pool.send(msg);
                     } else if &rid == to && is_key_frame {
                         let msg = StreamSenderPoolMessage::RtpPacket(
                             self.id,
                             *destination,
-                            rtp_packet.clone(),
+                            pkt.clone(),
                         );
                         let _ = self.stream_sender_pool.send(msg);
                         *state = VideoSwitchState::Switched(to.clone());
