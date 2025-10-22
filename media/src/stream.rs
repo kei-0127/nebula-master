@@ -166,14 +166,14 @@ pub enum RpcSource {
 
 #[derive(Clone, Debug)]
 pub enum StreamReceiverMessage {
-    Packet(Vec<u8>, Instant),
+    Packet(Bytes, Instant),
     Rpc(RpcMessage),
     UpdateAllocatedVideos(HashMap<Uuid, AllocatedVideo>),
 }
 
 pub enum StreamSenderMessage {
     RtpPacket(Uuid, Bytes),
-    RtcpPacket(Vec<u8>),
+    RtcpPacket(Bytes),
     Rpc(RpcMessage, RpcSource),
     InboundRecording(Vec<u8>),
     PrepareRtpPacket(OwnedPermit<RtpOut>),
@@ -185,7 +185,7 @@ pub enum StreamSenderMessage {
 #[derive(Clone)]
 pub enum StreamSenderPoolMessage {
     RtpPacket(Uuid, Uuid, Bytes),
-    RtcpPacket(Uuid, Vec<u8>),
+    RtcpPacket(Uuid, Bytes),
     Rpc(Uuid, RpcMessage),
     InboundRecording(Uuid, Vec<u8>),
     TransportLayerCc(Uuid, TransportLayerCc, Instant),
@@ -208,7 +208,7 @@ impl PeerTransport {
         match &self {
             PeerTransport::LocalPeer(sender) => {
                 sender.send(StreamReceiverMessage::Packet(
-                    buf.to_vec(),
+                    Bytes::copy_from_slice(buf),
                     Instant::now(),
                 ))?;
             }
@@ -383,7 +383,6 @@ impl MediaStreamReceiver {
                 };
                 match msg {
                     StreamReceiverMessage::Packet(packet, _) => {
-                        let packet = Bytes::from(packet);
                         for destination in &destinations {
                             let msg = StreamSenderPoolMessage::RtpPacket(
                                 uuid,
@@ -530,7 +529,7 @@ impl MediaStreamReceiver {
                 // the reason for that is the video allocation is done in sender stream,
                 // and before the video allocation is done, there won't be any packets sent to it
                 let _ = stream_sender_pool
-                    .send(StreamSenderPoolMessage::RtcpPacket(uuid, vec![]));
+                    .send(StreamSenderPoolMessage::RtcpPacket(uuid, Bytes::new()));
 
                 loop {
                     let msg =
@@ -824,11 +823,10 @@ impl AudioStreamSenderPool {
                     if let Ok(n) = remote_rtcp_udp.recv(&mut buf).await {
                         let (uuid, packet) = buf[..n].split_at(16);
                         if let Ok(uuid) = Uuid::from_slice(uuid) {
-                            let _ =
-                                sender.send(StreamSenderPoolMessage::RtcpPacket(
-                                    uuid,
-                                    packet.to_vec(),
-                                ));
+                            let _ = sender.send(StreamSenderPoolMessage::RtcpPacket(
+                                uuid,
+                                Bytes::copy_from_slice(packet),
+                            ));
                         }
                     }
                 }
@@ -863,7 +861,7 @@ impl AudioStreamSenderPool {
             if let Some(msg) = self.receiver.recv().await {
                 let (id, msg) = match msg {
                     StreamSenderPoolMessage::RtcpPacket(dst, packet) => {
-                        (dst, StreamSenderMessage::RtcpPacket(packet))
+                (dst, StreamSenderMessage::RtcpPacket(packet))
                     }
                     StreamSenderPoolMessage::RtpPacket(src, dst, packet) => {
                         (dst, StreamSenderMessage::RtpPacket(src, packet))
@@ -1275,7 +1273,7 @@ impl AudioStreamReceiver {
 
     // Process RTCP for audio
     // Decrypt if needed and refresh activity/keepalive markers
-    async fn receive_rtcp_packet(&mut self, mut rtcp_packet: Vec<u8>) -> Result<()> {
+    async fn receive_rtcp_packet(&mut self, rtcp_packet: Bytes) -> Result<()> {
         let _ = REDIS
             .hsetex(
                 &format!("nebula:channel:{}", &self.channel),
@@ -1288,7 +1286,7 @@ impl AudioStreamReceiver {
             .await;
         if let Some(crypto) = self.crypto.as_ref() {
             let crypto = crypto.state.clone();
-            rtcp_packet =
+            let _decrypted =
                 nebula_task::spawn_task(move || crypto.decrypt_rtcp(&rtcp_packet))
                     .await??;
         }
@@ -1309,7 +1307,7 @@ impl AudioStreamReceiver {
     // - if in a room: report audio level from ext id = 1 (rate-limited)
     pub async fn receive_rtp_packet(
         &mut self,
-        mut raw_rtp_packet: Vec<u8>,
+        mut raw_rtp_packet: Bytes,
     ) -> Result<()> {
         let now = time::SystemTime::now()
             .duration_since(time::SystemTime::UNIX_EPOCH)?
@@ -1342,10 +1340,11 @@ impl AudioStreamReceiver {
         if let Some(crypto) = self.crypto.as_mut() {
             let roc = crypto.update_roc(&raw_rtp_packet).await;
             let crypto = crypto.state.clone();
-            raw_rtp_packet = nebula_task::spawn_task(move || {
+            let decrypted = nebula_task::spawn_task(move || {
                 crypto.decrypt_rtp(roc, &raw_rtp_packet)
             })
             .await??;
+            raw_rtp_packet = Bytes::from(decrypted);
         }
 
         if self.mode != MediaMode::Sendrecv {
@@ -1372,7 +1371,7 @@ impl AudioStreamReceiver {
                     self.destinations.as_ref().unwrap()
                 }
             };
-            let packet = Bytes::from(raw_rtp_packet.clone());
+            let packet = raw_rtp_packet.clone();
             for destination in destinations {
                 let msg = StreamSenderPoolMessage::RtpPacket(
                     self.id,
@@ -1384,9 +1383,7 @@ impl AudioStreamReceiver {
             return Ok(());
         }
 
-        let rtp_packet = rtp::packet::Packet::unmarshal(&mut bytes::Bytes::from(
-            raw_rtp_packet.clone(),
-        ))?;
+        let rtp_packet = rtp::packet::Packet::unmarshal(&mut raw_rtp_packet.clone())?;
 
         let pt = rtp_packet.header.payload_type;
         if pt != self.rtpmap.type_number && self.dtmf_pts.contains(&pt) {
@@ -1483,7 +1480,7 @@ impl AudioStreamReceiver {
                 self.destinations.as_ref().unwrap()
             }
         };
-        let packet = Bytes::from(raw_rtp_packet.clone());
+        let packet = raw_rtp_packet.clone();
         for destination in destinations {
             let msg = StreamSenderPoolMessage::RtpPacket(
                 self.id,
@@ -3842,7 +3839,7 @@ impl StreamSender {
                         let _ = self.receive_rtp(src, packet.to_vec()).await;
                     }
                     StreamSenderMessage::RtcpPacket(packet) => {
-                        let _ = self.receive_rtcp(packet).await;
+                        let _ = self.receive_rtcp(packet.to_vec()).await;
                     }
                     StreamSenderMessage::PrepareRtpPacket(tx) => {
                         if let StreamSender::AudioLocal(local) = self {
@@ -3975,11 +3972,10 @@ impl StreamSender {
     ) -> Result<()> {
         match self {
             StreamSender::AudioRemote(remote) => {
-                let rtp_packet =
-                    RtpPacket::set_extension(&rtp_packet, remote.id.as_bytes());
+                let mut pkt = RtpPacket::set_extension_pooled(&rtp_packet, remote.id.as_bytes());
                 remote
                     .recording_udp
-                    .send_to(&rtp_packet, &remote.remote_recording_addr)
+                    .send_to(&pkt[..], &remote.remote_recording_addr)
                     .await?;
             }
             StreamSender::AudioLocal(local) => {
@@ -4137,10 +4133,10 @@ impl StreamSender {
                 } else {
                     let mut ext = source_id.as_bytes().to_vec();
                     ext.extend_from_slice(remote.id.as_bytes());
-                    let rtp_packet = RtpPacket::set_extension(&rtp_packet, &ext);
+                    let mut pkt = RtpPacket::set_extension_pooled(&rtp_packet, &ext);
                     remote
                         .remote_udp
-                        .send_to(&rtp_packet, &remote.remote_addr)
+                        .send_to(&pkt[..], &remote.remote_addr)
                         .await?;
                 }
             }
@@ -4157,10 +4153,10 @@ impl StreamSender {
             StreamSender::VideoRemote(remote) => {
                 let mut ext = source_id.as_bytes().to_vec();
                 ext.extend_from_slice(remote.uuid.as_bytes());
-                let rtp_packet = RtpPacket::set_extension(&rtp_packet, &ext);
+                let mut pkt = RtpPacket::set_extension_pooled(&rtp_packet, &ext);
                 remote
                     .remote_rtp_udp
-                    .send_to(&rtp_packet, &remote.remote_rtp_addr)
+                    .send_to(&pkt[..], &remote.remote_rtp_addr)
                     .await?;
             }
             StreamSender::VideoPeer(_) => {}
@@ -4186,12 +4182,10 @@ impl ForwardState {
         let mut rtp_packet = RtpPacket::new();
         rtp_packet.set_ssrc(src.as_fields().0);
         rtp_packet.set_payload_type(pt);
-        let mut rtp_packet =
-            RtpPacket::set_extension(rtp_packet.data(), &[0x31, 0, 0]);
-        let extension_offset = RtpPacket::extension_offset(&rtp_packet);
-        rtp_packet[extension_offset] = 0xbe;
-        rtp_packet[extension_offset + 1] = 0xde;
-        let rtp_packet = RtpPacket::from_vec(rtp_packet);
+        rtp_packet.set_extension_in_place(&[0x31, 0, 0]);
+        let extension_offset = RtpPacket::extension_offset(rtp_packet.data());
+        rtp_packet.mut_data()[extension_offset] = 0xbe;
+        rtp_packet.mut_data()[extension_offset + 1] = 0xde;
         Self {
             src,
             incoming_ssrc: 0,
@@ -4440,8 +4434,9 @@ impl VideoStreamSenderLocal {
         for nack in nack.nacks {
             for seqnum in nack.packet_list() {
                 if let Some(mut rtx) = self.rtx_sender.resend_as_rtx(ssrc, seqnum) {
-                    RtpPacket::set_pt(&mut rtx, self.rtpmap.type_number + 1);
-                    let rtp_packet = RtpPacket::from_vec(rtx);
+                    let mut pkt = RtpPacket::from_bytes(rtx);
+                    pkt.set_payload_type(self.rtpmap.type_number + 1);
+                    let rtp_packet = pkt;
                     let _ = self.send_rtp_packet(rtp_packet).await;
                 }
             }
@@ -4729,17 +4724,18 @@ impl VideoStreamReceiver {
         }
     }
 
-    async fn receive_rtcp_packet(&mut self, mut rtcp_packet: Vec<u8>) -> Result<()> {
+    async fn receive_rtcp_packet(&mut self, rtcp_packet: Bytes) -> Result<()> {
         let now = Instant::now();
 
-        if let Some(crypto) = self.crypto.as_mut() {
+        let mut buf = if let Some(crypto) = self.crypto.as_mut() {
             let crypto = crypto.state.clone();
-            rtcp_packet =
+            let decrypted =
                 nebula_task::spawn_task(move || crypto.decrypt_rtcp(&rtcp_packet))
                     .await??;
-        }
-
-        let mut buf = Bytes::from(rtcp_packet);
+            Bytes::from(decrypted)
+        } else {
+            rtcp_packet.clone()
+        };
         while buf.remaining() > 0 {
             let header = rtcp::header::Header::unmarshal(&mut buf.clone())?;
             let len = (header.length as usize) * 4 + RTCP_HEADER_LEN;
@@ -4767,7 +4763,7 @@ impl VideoStreamReceiver {
                             pli.media_ssrc = ssrc;
                             let msg = StreamSenderPoolMessage::RtcpPacket(
                                 uuid,
-                                pli.marshal()?.to_vec(),
+                                Bytes::from(pli.marshal()?),
                             );
                             let _ = self.stream_sender_pool.send(msg);
                         }
@@ -4812,20 +4808,23 @@ impl VideoStreamReceiver {
     // Video receiver RTP handler: decrypts (if SRTP), handle RTX recovery and RID/TCC, update layers, and forward
     async fn receive_rtp_packet(
         &mut self,
-        mut rtp_packet: Vec<u8>,
+        rtp_packet: Bytes,
         now: Instant,
     ) -> Result<()> {
-        if let Some(crypto) = self.crypto.as_mut() {
+        let mut rtp_packet = if let Some(crypto) = self.crypto.as_mut() {
             let roc = crypto.update_roc(&rtp_packet).await;
             let crypto = crypto.state.clone();
-            rtp_packet = nebula_task::spawn_task(move || {
+            let decrypted = nebula_task::spawn_task(move || {
                 crypto.decrypt_rtp(roc, &rtp_packet)
             })
             .await??;
-        }
+            Bytes::from(decrypted)
+        } else {
+            rtp_packet
+        };
 
         if let Some(codec) = self.codec.clone() {
-            let _ = self.handle_peer_to_peer(codec, rtp_packet).await;
+            let _ = self.handle_peer_to_peer(codec, rtp_packet.to_vec()).await;
             return Ok(());
         }
 
@@ -4835,9 +4834,7 @@ impl VideoStreamReceiver {
             return Ok(());
         }
 
-        let rtp = rtp::packet::Packet::unmarshal(&mut bytes::Bytes::from(
-            rtp_packet.clone(),
-        ))?;
+        let rtp = rtp::packet::Packet::unmarshal(&mut rtp_packet.clone())?;
 
         let ssrc = rtp.header.ssrc;
         let mut rid = "";
@@ -4867,7 +4864,7 @@ impl VideoStreamReceiver {
                         if let Ok(pkt) = feedback.marshal() {
                             let msg = StreamSenderPoolMessage::RtcpPacket(
                                 self.id,
-                                pkt.to_vec(),
+                                pkt,
                             );
                             let _ = self.stream_sender_pool.send(msg);
                         }
@@ -4883,12 +4880,17 @@ impl VideoStreamReceiver {
                 && rtp.payload.len() > 2
             {
                 let seq = BigEndian::read_u16(&rtp.payload);
-                RtpPacket::buffer_set_sequence(&mut rtp_packet, seq);
-                RtpPacket::set_pt(&mut rtp_packet, self.rtpmap.type_number);
-                RtpPacket::buffer_set_paylod(&mut rtp_packet, &rtp.payload[2..]);
+                // Move to BytesMut for in-place edits
+                let mut pkt = BytesMut::from(&rtp_packet[..]);
+                RtpPacket::buffer_set_sequence(&mut pkt, seq);
+                RtpPacket::set_pt_bytesmut(&mut pkt, self.rtpmap.type_number);
+                RtpPacket::buffer_set_payload_bytesmut(&mut pkt, &rtp.payload[2..]);
+                rtp_packet = pkt.freeze();
                 if let Some(ssrc) = self.rid_ssrcs.get(&rid) {
                     // rewrite the ssrc on the rtx to the actual VP8 rtp packet
-                    RtpPacket::set_packet_ssrc(&mut rtp_packet, *ssrc);
+                    let mut pkt = BytesMut::from(&rtp_packet[..]);
+                    RtpPacket::set_packet_ssrc(&mut pkt, *ssrc);
+                    rtp_packet = pkt.freeze();
                 }
                 rtp::packet::Packet::unmarshal(&mut bytes::Bytes::from(
                     rtp_packet.clone(),
@@ -4937,7 +4939,7 @@ impl VideoStreamReceiver {
             };
             if let Ok(packet) = pli.marshal() {
                 let msg =
-                    StreamSenderPoolMessage::RtcpPacket(self.id, packet.to_vec());
+                    StreamSenderPoolMessage::RtcpPacket(self.id, Bytes::from(packet));
                 let _ = self.stream_sender_pool.send(msg);
             }
         }
@@ -5080,7 +5082,7 @@ impl VideoStreamReceiver {
         ) {
             let msg = StreamSenderPoolMessage::RtcpPacket(
                 self.id,
-                nack.marshal()?.to_vec(),
+                Bytes::from(nack.marshal()?),
             );
             let _ = self.stream_sender_pool.send(msg);
         }
@@ -5134,7 +5136,7 @@ impl VideoStreamReceiver {
             };
             if let Ok(packet) = pli.marshal() {
                 let msg =
-                    StreamSenderPoolMessage::RtcpPacket(self.id, packet.to_vec());
+                    StreamSenderPoolMessage::RtcpPacket(self.id, Bytes::from(packet));
                 let _ = self.stream_sender_pool.send(msg);
             }
         }

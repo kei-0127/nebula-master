@@ -3,6 +3,9 @@
 // Supports IPv4, UDP, and RTP packet construction and parsing
 
 use byteorder::{BigEndian, ByteOrder};
+use bytes::{BufMut, Bytes, BytesMut};
+use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 use rand::RngCore;
 use std::net::Ipv4Addr;
 
@@ -36,14 +39,14 @@ const MARKER_BIT: u8 = 0x80;              // Marker bit flag
 // It provides methods for constructing, parsing, and manipulating IPv4 headers for network communication
 #[derive(Clone)]
 pub struct Ipv4Packet {
-    inner: Vec<u8>,  // Raw packet data
+    inner: BytesMut,  // Raw packet data
 }
 
 // UDP transport layer packet
 // This struct represents a UDP packet with header support
 // It handles UDP header construction and provides methods for UDP-specific operations
 pub struct UdpPacket {
-    inner: Vec<u8>,  // Raw packet data
+    inner: BytesMut,  // Raw packet data
 }
 
 // RTP application layer packet
@@ -51,17 +54,15 @@ pub struct UdpPacket {
 // It provides methods for RTP header manipulation, payload handling and RTP-specific operations for real-time media transmission
 #[derive(Clone)]
 pub struct RtpPacket {
-    inner: Vec<u8>,  // Raw packet data
+    inner: BytesMut,  // Raw packet data
 }
 
 // IPv4 helpers: build minimal IPv4+UDP container and fill header fields
 impl Ipv4Packet {
     // Create a fresh IPv4 packet with default V4/TTL/UDP protocol headers
     pub fn new() -> Ipv4Packet {
-        let mut inner = Vec::with_capacity(IPV4_HEADER_LEN + UDP_HEADER_LEN);
-        for _ in 0..IPV4_HEADER_LEN + UDP_HEADER_LEN {
-            inner.push(0);
-        }
+        let mut inner = BytesMut::with_capacity(IPV4_HEADER_LEN + UDP_HEADER_LEN);
+        inner.resize(IPV4_HEADER_LEN + UDP_HEADER_LEN, 0);
 
         let mut p = Ipv4Packet { inner };
         p.set_version(4);
@@ -188,7 +189,8 @@ fn csum(mut sum: u32, data: &[u8]) -> u32 {
 impl RtpPacket {
     // New RTP packet with v2 header and randomized SSRC/sequence/timestamp
     pub fn new() -> RtpPacket {
-        let mut inner = vec![0; RTP_HEADER_LEN];
+        let mut inner = BytesMut::with_capacity(RTP_HEADER_LEN);
+        inner.resize(RTP_HEADER_LEN, 0);
         inner[0] = 0x80;
 
         let mut p = RtpPacket { inner };
@@ -213,7 +215,13 @@ impl RtpPacket {
 
     // Wrap an existing RTP buffer without validation or copying
     pub fn from_vec(buf: Vec<u8>) -> Self {
-        Self { inner: buf }
+        // Note: converts via slice to ensure BytesMut owns a fresh buffer
+        Self { inner: BytesMut::from(buf.as_slice()) }
+    }
+
+    // Wrap an existing RTP buffer from Bytes
+    pub fn from_bytes(buf: Bytes) -> Self {
+        Self { inner: BytesMut::from(&buf[..]) }
     }
 
     // Read SSRC from this RTP packet
@@ -341,9 +349,19 @@ impl RtpPacket {
         buffer[MARKER_PT_OFFSET] |= pt & PT_MASK;
     }
 
-    // Replace payload in a mutable buffer, preserving header and extensions
-    pub fn buffer_set_paylod(buffer: &mut Vec<u8>, payload: &[u8]) {
-        let payload_offset = Self::payload_offset(buffer);
+    // Set payload type on a BytesMut buffer
+    pub fn set_pt_bytesmut(buffer: &mut BytesMut, pt: u8) {
+        if buffer.len() > MARKER_PT_OFFSET {
+            let byte = buffer[MARKER_PT_OFFSET];
+            let cleared = byte & (byte ^ PT_MASK);
+            let updated = cleared | (pt & PT_MASK);
+            buffer[MARKER_PT_OFFSET] = updated;
+        }
+    }
+
+    // Replace payload on a BytesMut buffer: truncate at payload offset and extend with new payload
+    pub fn buffer_set_payload_bytesmut(buffer: &mut BytesMut, payload: &[u8]) {
+        let payload_offset = Self::payload_offset(&buffer[..]);
         buffer.truncate(payload_offset);
         buffer.extend_from_slice(payload);
     }
@@ -389,8 +407,8 @@ impl RtpPacket {
     }
 
     // Write/replace a raw extension block (0xBEDE format-length header + padded data)
-     // Returns a new buffer with extension applied. Minimizes allocations/copies.
-    pub fn set_extension(buffer: &[u8], data: &[u8]) -> Vec<u8> {
+    // Returns a BytesMut buffer with the extension applied (fewer conversions vs Vec)
+    pub fn set_extension(buffer: &[u8], data: &[u8]) -> BytesMut {
         let offset = (Self::get_csrc_count(buffer) * 4) as usize + RTP_HEADER_LEN;
         let old_ext_len = Self::get_extension_length(buffer);
 
@@ -399,31 +417,87 @@ impl RtpPacket {
         let padded_len = new_ext_words as usize * 4;
 
         // Capacity: original len - old extension + new header(4) + padded data
-        let mut out = Vec::with_capacity(
-            buffer.len() - old_ext_len + RTP_EXTENSIONS_HEADER_LEN + padded_len,
-        );
+        let needed = buffer.len() - old_ext_len + RTP_EXTENSIONS_HEADER_LEN + padded_len;
+        let mut pooled = PooledBytesMut::new_with_capacity(needed);
 
         // 1) Copy header + CSRCs up to extension offset
-        out.extend_from_slice(&buffer[..offset]);
+        pooled.extend_from_slice(&buffer[..offset]);
 
         // 2) Write 0xBEDE + length (words)
-        out.extend_from_slice(&[0xBE, 0xDE, 0, 0]);
-        let hdr_len_pos = out.len() - 2; // last two bytes we just appended
-        BigEndian::write_u16(&mut out[hdr_len_pos..hdr_len_pos + 2], new_ext_words);
+        pooled.extend_from_slice(&[0xBE, 0xDE, 0, 0]);
+        let hdr_len_pos = pooled.len() - 2; // last two bytes we just appended
+        BigEndian::write_u16(&mut pooled[hdr_len_pos..hdr_len_pos + 2], new_ext_words);
 
         // 3) Left-pad with zeros to multiple of 32 bits, then append data
         let pad = padded_len - data.len();
         if pad > 0 {
-            out.extend(std::iter::repeat(0u8).take(pad));
+            pooled.extend(std::iter::repeat(0u8).take(pad));
         }
-        out.extend_from_slice(data);
+        pooled.extend_from_slice(data);
 
         // 4) Append the remainder after the old extension block
-        out.extend_from_slice(&buffer[offset + old_ext_len..]);
+        pooled.extend_from_slice(&buffer[offset + old_ext_len..]);
 
         // Ensure extension bit is set
-        out[0] |= EXTENSION_BIT;
-        out
+        pooled[0] |= EXTENSION_BIT;
+        pooled.into_inner()
+    }
+
+    // Build extension into a pooled buffer; the buffer is returned to the pool when dropped
+    pub fn set_extension_pooled(buffer: &[u8], data: &[u8]) -> PooledBytesMut {
+        let offset = (Self::get_csrc_count(buffer) * 4) as usize + RTP_HEADER_LEN;
+        let old_ext_len = Self::get_extension_length(buffer);
+
+        let new_ext_words = ((data.len() + 3) / 4) as u16;
+        let padded_len = new_ext_words as usize * 4;
+        let needed = buffer.len() - old_ext_len + RTP_EXTENSIONS_HEADER_LEN + padded_len;
+
+        let mut pooled = PooledBytesMut::new_with_capacity(needed);
+        pooled.extend_from_slice(&buffer[..offset]);
+        pooled.extend_from_slice(&[0xBE, 0xDE, 0, 0]);
+        let hdr_len_pos = pooled.len() - 2;
+        BigEndian::write_u16(&mut pooled[hdr_len_pos..hdr_len_pos + 2], new_ext_words);
+        let pad = padded_len - data.len();
+        if pad > 0 {
+            pooled.extend(std::iter::repeat(0u8).take(pad));
+        }
+        pooled.extend_from_slice(data);
+        pooled.extend_from_slice(&buffer[offset + old_ext_len..]);
+        pooled[0] |= EXTENSION_BIT;
+        pooled
+    }
+
+    // In-place write/replace an RTP header extension on a mutable buffer.
+    // Ensures capacity and rewrites the extension block with 0xBEDE header and padded data.
+    pub fn set_extension_bytesmut(buffer: &mut BytesMut, data: &[u8]) {
+        let offset = (Self::get_csrc_count(buffer) * 4) as usize + RTP_HEADER_LEN;
+        let old_ext_len = Self::get_extension_length(buffer);
+
+        let new_ext_words = ((data.len() + 3) / 4) as u16;
+        let padded_len = new_ext_words as usize * 4; // includes padding zeros
+        let new_total_ext_len = RTP_EXTENSIONS_HEADER_LEN + padded_len;
+
+        // Split off the tail after the existing extension block (or after header if none)
+        let tail = buffer.split_off(offset + old_ext_len);
+
+        // Ensure capacity for header + padded data
+        buffer.reserve(new_total_ext_len);
+
+        // 0xBEDE header + length (in 32-bit words)
+        buffer.extend_from_slice(&[0xBE, 0xDE, 0, 0]);
+        let len_pos = buffer.len() - 2;
+        BigEndian::write_u16(&mut buffer[len_pos - 0..len_pos + 2], new_ext_words);
+
+        // Left-pad zeros to word boundary then append data
+        let pad = padded_len - data.len();
+        if pad > 0 {
+            buffer.extend(std::iter::repeat(0u8).take(pad));
+        }
+        buffer.extend_from_slice(data);
+
+        // Append the tail and set extension bit
+        buffer.extend_from_slice(&tail);
+        buffer[0] |= EXTENSION_BIT;
     }
 
     // Return a slice of the raw extension data (excluding 0xBEDE + header size)
@@ -483,7 +557,12 @@ impl RtpPacket {
     }
 
     // Mutably borrow the underlying buffer for this RTP packet
-    pub fn mut_data(&mut self) -> &mut Vec<u8> {
+    pub fn mut_data(&mut self) -> &mut BytesMut {
+        // Expose as a mutable byte buffer for in-place mutations
+        // Returning &mut BytesMut maintains existing indexing/slicing semantics
+        // for callers that use ranges like [offset..]
+        // NOTE: signature changed to &mut BytesMut for zero-copy mutation
+        // Callers using methods like `extend_from_slice` and slicing continue to work.
         &mut self.inner
     }
 
@@ -514,6 +593,87 @@ impl RtpPacket {
                 .unwrap_or(0),
         );
     }
+
+    // In-place convenience: apply/replace header extension directly to this RTP packet
+    pub fn set_extension_in_place(&mut self, data: &[u8]) {
+        Self::set_extension_bytesmut(&mut self.inner, data);
+    }
+
+    // Builder-style helper: return packet with extension applied
+    pub fn with_extension(mut self, data: &[u8]) -> Self {
+        Self::set_extension_bytesmut(&mut self.inner, data);
+        self
+    }
+}
+
+// Lightweight fixed-capacity buffer pool for small extension rewrites.
+thread_local! {
+    static EXT_BUF_POOL: RefCell<Vec<BytesMut>> = RefCell::new(Vec::with_capacity(16));
+}
+
+fn ext_pool_take_with_capacity(capacity: usize) -> BytesMut {
+    let mut buf = EXT_BUF_POOL.with(|pool| {
+        let mut v = pool.borrow_mut();
+        v.pop()
+    });
+    match buf {
+        Some(mut b) => {
+            if b.capacity() < capacity {
+                b.reserve(capacity - b.capacity());
+            }
+            b.truncate(0);
+            b
+        }
+        None => BytesMut::with_capacity(capacity),
+    }
+}
+
+fn ext_pool_put(buf: BytesMut) {
+    // Keep only reasonably small buffers to avoid unbounded memory growth
+    if buf.capacity() <= 2048 {
+        EXT_BUF_POOL.with(|pool| {
+            let mut v = pool.borrow_mut();
+            if v.len() < 32 {
+                v.push(buf);
+            }
+        });
+    }
+}
+
+// RAII wrapper that returns the inner BytesMut back to the pool on drop.
+pub struct PooledBytesMut {
+    inner: Option<BytesMut>,
+}
+
+impl PooledBytesMut {
+    fn new_with_capacity(capacity: usize) -> Self {
+        Self { inner: Some(ext_pool_take_with_capacity(capacity)) }
+    }
+
+    pub fn into_inner(mut self) -> BytesMut {
+        self.inner.take().unwrap()
+    }
+}
+
+impl Drop for PooledBytesMut {
+    fn drop(&mut self) {
+        if let Some(buf) = self.inner.take() {
+            ext_pool_put(buf);
+        }
+    }
+}
+
+impl Deref for PooledBytesMut {
+    type Target = BytesMut;
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref().unwrap()
+    }
+}
+
+impl DerefMut for PooledBytesMut {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.as_mut().unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -538,26 +698,26 @@ mod tests {
         let ext = [0xAB, 0xCD, 0xEF];
         let out = RtpPacket::set_extension(&base, &ext);
 
-        assert!(RtpPacket::get_extension_bit(&out));
+        assert!(RtpPacket::get_extension_bit(&out[..]));
 
-        let off = RtpPacket::extension_offset(&out);
+        let off = RtpPacket::extension_offset(&out[..]);
         assert_eq!(out[off], 0xBE);
         assert_eq!(out[off + 1], 0xDE);
 
         let words = BigEndian::read_u16(&out[off + 2..off + 4]);
         assert_eq!(words, 1);
 
-        let ext_len = RtpPacket::get_extension_length(&out);
+        let ext_len = RtpPacket::get_extension_length(&out[..]);
         let ext_data = &out[off + 4..off + ext_len];
         assert_eq!(ext_data, &[0, 0xAB, 0xCD, 0xEF]);
 
-        let payload_off = RtpPacket::payload_offset(&out);
+        let payload_off = RtpPacket::payload_offset(&out[..]);
         assert_eq!(&out[payload_off..], &[9, 9, 9]);
 
         // Header fields intact
-        assert_eq!(RtpPacket::get_ssrc(&out), 0x11223344);
-        assert_eq!(RtpPacket::get_sequence(&out), 0x5566);
-        assert_eq!(RtpPacket::get_timestamp(&out), 0x77889900);
+        assert_eq!(RtpPacket::get_ssrc(&out[..]), 0x11223344);
+        assert_eq!(RtpPacket::get_sequence(&out[..]), 0x5566);
+        assert_eq!(RtpPacket::get_timestamp(&out[..]), 0x77889900);
     }
 
     #[test]
@@ -567,15 +727,15 @@ mod tests {
         let out1 = RtpPacket::set_extension(&base, &[0x11, 0x22, 0x33, 0x44]); 
         let out2 = RtpPacket::set_extension(&out1, &[0xAA, 0xBB]); 
 
-        let off = RtpPacket::extension_offset(&out2);
+        let off = RtpPacket::extension_offset(&out2[..]);
         let words = BigEndian::read_u16(&out2[off + 2..off + 4]);
         assert_eq!(words, 1);
-        let ext_len = RtpPacket::get_extension_length(&out2);
+        let ext_len = RtpPacket::get_extension_length(&out2[..]);
         let ext_data = &out2[off + 4..off + ext_len];
         assert_eq!(ext_data, &[0, 0, 0xAA, 0xBB]);
 
         // Payload preserved
-        let payload_off = RtpPacket::payload_offset(&out2);
+        let payload_off = RtpPacket::payload_offset(&out2[..]);
         assert_eq!(&out2[payload_off..], &[1, 2, 3, 4, 5]);
     }
 }

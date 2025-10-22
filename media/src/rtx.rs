@@ -123,26 +123,26 @@ impl RtxSender {
 //  `seqnum` - The sequence number of the packet to retransmit
 //
 //  Returns
-//  `Some(Vec<u8>)` - The RTX packet data if the original packet was found
+//  `Some(Bytes)` - The RTX packet data if the original packet was found
 //  `None` - If the original packet is not in the cache
     pub fn resend_as_rtx(
         &mut self,
         ssrc: Ssrc,
         seqnum: TruncatedSequenceNumber,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Bytes> {
         let rtx_ssrc = to_rtx_ssrc(ssrc);
         let rtx_seqnum = *self.get_next_seqnum_mut(rtx_ssrc);
 
         // Look up the original packet in the cach
         let previously_sent = self.previously_sent_by_seqnum.get(&(ssrc, seqnum))?;
-        let mut rtx = packet_to_rtx(previously_sent, rtx_ssrc, rtx_seqnum as u16);
+        let mut rtx = packet_to_rtx(previously_sent.as_ref(), rtx_ssrc, rtx_seqnum as u16);
         // This has to go after the use of previously_sent.to_rtx because previously_sent
         // has a ref to self.previously_sent_by_seqnum until then, and so we can't
         // get a mut ref to self.next_outgoing_seqnum until after we release that.
         // But we don't want to call self.increment_seqnum() before we call self.previously_sent_by_seqnum.get
         // because it might return None, in which case we don't want to waste a seqnum.
         self.increment_seqnum(rtx_ssrc);
-        Some(rtx)
+        Some(Bytes::from(rtx))
     }
 }
 
@@ -167,8 +167,8 @@ fn to_rtx_ssrc(ssrc: Ssrc) -> Ssrc {
 // `seq` - The new sequence number for the RTX packet
 //
 // Returns
-// `Vec<u8>` - The RTX packet data
-fn packet_to_rtx(packet: &[u8], ssrc: u32, seq: u16) -> Vec<u8> {
+// `Bytes` - The RTX packet data
+fn packet_to_rtx(packet: &[u8], ssrc: u32, seq: u16) -> Bytes {
     // Compute lengths
     let payload = RtpPacket::get_payload(packet);
     let payload_offset = RtpPacket::payload_offset(packet);
@@ -189,5 +189,5 @@ fn packet_to_rtx(packet: &[u8], ssrc: u32, seq: u16) -> Vec<u8> {
     BigEndian::write_u16(&mut new_packet[end - 2..end], original_seq);
     new_packet.extend_from_slice(payload);
 
-    new_packet
+    Bytes::from(new_packet)
 }
