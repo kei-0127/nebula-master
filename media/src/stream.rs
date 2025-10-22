@@ -109,6 +109,7 @@ use crate::transportcc::{expand_truncated_counter, TccReceiver, TccSender};
 const REMOTE_RTP_PORT: u16 = 9876;  // RTP media packets
 const REMOTE_RTCP_PORT: u16 = 9877; // RTCP control packets
 const RECORDING_PORT: u16 = 8765;   // Call recording
+const MAX_UDP_PACKET_SIZE: usize = 5000;
 
 // Audio processing thresholds
 const THRESHOLD: f64 = 0.6;     // Silence detection threshold
@@ -175,7 +176,7 @@ pub enum StreamSenderMessage {
     RtpPacket(Uuid, Bytes),
     RtcpPacket(Bytes),
     Rpc(RpcMessage, RpcSource),
-    InboundRecording(Vec<u8>),
+    InboundRecording(Bytes),
     PrepareRtpPacket(OwnedPermit<RtpOut>),
     TransportLayerCc(TransportLayerCc, Instant),
     TransportLayerNack(TransportLayerNack, Instant),
@@ -187,7 +188,7 @@ pub enum StreamSenderPoolMessage {
     RtpPacket(Uuid, Uuid, Bytes),
     RtcpPacket(Uuid, Bytes),
     Rpc(Uuid, RpcMessage),
-    InboundRecording(Uuid, Vec<u8>),
+    InboundRecording(Uuid, Bytes),
     TransportLayerCc(Uuid, TransportLayerCc, Instant),
     TransportLayerNack(Uuid, TransportLayerNack, Instant),
     VideoFrame(Uuid, ffmpeg_next::frame::Video),
@@ -773,27 +774,32 @@ impl AudioStreamSenderPool {
         let remote_rtp_udp = self.remote_rtp_udp.clone();
         let sender = self.sender.clone();
         tokio::spawn(async move {
-            let mut buf = [0; 5000];
+            let mut buf = BytesMut::with_capacity(MAX_UDP_PACKET_SIZE);
             loop {
-                if let Ok(n) = remote_rtp_udp.recv(&mut buf).await {
-                    let mut tmp = BytesMut::with_capacity(1500);
-                    tmp.resize(5000, 0);
-                    tmp[..n].copy_from_slice(&buf[..n]);
-                    tmp.truncate(n);
-                    let packet = tmp.freeze();
-                    if let Some(ext) = RtpPacket::get_extension(&packet) {
-                        if ext.len() == 32 {
-                            let (src, dst) = ext.split_at(16);
-                            if let Ok(src) = Uuid::from_slice(src) {
-                                if let Ok(dst) = Uuid::from_slice(dst) {
-                                    let _ = sender.send(
-                                        StreamSenderPoolMessage::RtpPacket(
-                                            src, dst, packet,
-                                        ),
-                                    );
+                buf.resize(MAX_UDP_PACKET_SIZE, 0);
+                if let Ok(n) = remote_rtp_udp.recv(&mut buf[..]).await {
+                    let packet = buf.split_to(n).freeze();
+                    buf.clear();
+                    let maybe_pair = RtpPacket::get_extension(&packet).and_then(
+                        |ext| {
+                            if ext.len() == 32 {
+                                let (src, dst) = ext.split_at(16);
+                                match (
+                                    Uuid::from_slice(src),
+                                    Uuid::from_slice(dst),
+                                ) {
+                                    (Ok(src), Ok(dst)) => Some((src, dst)),
+                                    _ => None,
                                 }
+                            } else {
+                                None
                             }
-                        }
+                        },
+                    );
+                    if let Some((src, dst)) = maybe_pair {
+                        let _ = sender.send(StreamSenderPoolMessage::RtpPacket(
+                            src, dst, packet,
+                        ));
                     }
                 }
             }
@@ -818,15 +824,21 @@ impl AudioStreamSenderPool {
             let remote_rtcp_udp = self.remote_rtcp_udp.clone();
             let sender = self.sender.clone();
             tokio::spawn(async move {
-                let mut buf = [0; 5000];
+                let mut buf = BytesMut::with_capacity(MAX_UDP_PACKET_SIZE);
                 loop {
-                    if let Ok(n) = remote_rtcp_udp.recv(&mut buf).await {
-                        let (uuid, packet) = buf[..n].split_at(16);
-                        if let Ok(uuid) = Uuid::from_slice(uuid) {
-                            let _ = sender.send(StreamSenderPoolMessage::RtcpPacket(
-                                uuid,
-                                Bytes::copy_from_slice(packet),
-                            ));
+                    buf.resize(MAX_UDP_PACKET_SIZE, 0);
+                    if let Ok(n) = remote_rtcp_udp.recv(&mut buf[..]).await {
+                        let mut packet = buf.split_to(n).freeze();
+                        buf.clear();
+                        if packet.len() >= 16 {
+                            let uuid_bytes = packet.split_to(16);
+                            if let Ok(uuid) = Uuid::from_slice(uuid_bytes.as_ref()) {
+                                let _ = sender.send(
+                                    StreamSenderPoolMessage::RtcpPacket(
+                                        uuid, packet,
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
@@ -836,22 +848,22 @@ impl AudioStreamSenderPool {
         let recording_udp = self.recording_udp.clone();
         let sender = self.sender.clone();
         tokio::spawn(async move {
-            let mut buf = [0; 5000];
+            let mut buf = BytesMut::with_capacity(MAX_UDP_PACKET_SIZE);
             loop {
-                if let Ok(n) = recording_udp.recv(&mut buf).await {
-                    let mut tmp = BytesMut::with_capacity(1500);
-                    tmp.resize(5000, 0);
-                    tmp[..n].copy_from_slice(&buf[..n]);
-                    tmp.truncate(n);
-                    let packet = tmp.freeze();
-                    if let Some(ext) = RtpPacket::get_extension(&packet) {
-                        if let Ok(uuid) = Uuid::from_slice(ext) {
-                            let _ = sender.send(
-                                StreamSenderPoolMessage::InboundRecording(
-                                    uuid, packet.to_vec(),
-                                ),
-                            );
-                        }
+                buf.resize(MAX_UDP_PACKET_SIZE, 0);
+                if let Ok(n) = recording_udp.recv(&mut buf[..]).await {
+                    let packet = buf.split_to(n).freeze();
+                    buf.clear();
+                    let maybe_uuid =
+                        RtpPacket::get_extension(&packet).and_then(|ext| {
+                            Uuid::from_slice(ext).ok()
+                        });
+                    if let Some(uuid) = maybe_uuid {
+                        let _ = sender.send(
+                            StreamSenderPoolMessage::InboundRecording(
+                                uuid, packet,
+                            ),
+                        );
                     }
                 }
             }
@@ -1493,7 +1505,7 @@ impl AudioStreamReceiver {
             self.stream_sender_pool
                 .send(StreamSenderPoolMessage::InboundRecording(
                     self.id,
-                    packet.to_vec(),
+                    packet.clone(),
                 ));
 
         if let Some(voicemail) = self.voicemail.as_mut() {
@@ -2419,7 +2431,7 @@ impl AudioStreamSenderLocal {
     async fn receive_rtp(
         &mut self,
         source_id: Uuid,
-        rtp_packet: Vec<u8>,
+        rtp_packet: Bytes,
     ) -> Result<()> {
         let ssrc = RtpPacket::get_ssrc(&rtp_packet);
         let rtp_buffer = {
@@ -2474,7 +2486,7 @@ impl AudioStreamSenderLocal {
                 }
             }
         };
-        rtp_buffer.add(RtpPacket::from_vec(rtp_packet)).await?;
+        rtp_buffer.add(RtpPacket::from_bytes(rtp_packet)).await?;
         Ok(())
     }
 
@@ -3836,10 +3848,10 @@ impl StreamSender {
                 match msg {
                     StreamSenderMessage::RtpPacket(src, packet) => {
                         last_timeout_check = now;
-                        let _ = self.receive_rtp(src, packet.to_vec()).await;
+                        let _ = self.receive_rtp(src, packet).await;
                     }
                     StreamSenderMessage::RtcpPacket(packet) => {
-                        let _ = self.receive_rtcp(packet.to_vec()).await;
+                        let _ = self.receive_rtcp(packet).await;
                     }
                     StreamSenderMessage::PrepareRtpPacket(tx) => {
                         if let StreamSender::AudioLocal(local) = self {
@@ -3968,11 +3980,12 @@ impl StreamSender {
     // - Video*: ignored
     async fn process_inbound_recording(
         &mut self,
-        rtp_packet: Vec<u8>,
+        rtp_packet: Bytes,
     ) -> Result<()> {
         match self {
             StreamSender::AudioRemote(remote) => {
-                let mut pkt = RtpPacket::set_extension_pooled(&rtp_packet, remote.id.as_bytes());
+                let mut pkt =
+                    RtpPacket::set_extension_pooled(rtp_packet.as_ref(), remote.id.as_bytes());
                 remote
                     .recording_udp
                     .send_to(&pkt[..], &remote.remote_recording_addr)
@@ -3988,17 +4001,19 @@ impl StreamSender {
                             local_fax.lock().is_t38()
                         })
                         .await?;
-                        let rtp_packet = rtp_packet.clone();
-                        if is_t38 && !RtpPacket::is_valid(&rtp_packet) {
+                        let packet_clone = rtp_packet.clone();
+                        if is_t38 && !RtpPacket::is_valid(packet_clone.as_ref()) {
                             // UDPTL ( fax ) path:non-RTP, let fax stack consume it
                             nebula_task::spawn_task(move || {
-                                fax.lock().process_udptl(&rtp_packet)
+                                fax.lock().process_udptl(packet_clone.as_ref())
                             })
                             .await?;
                             return Ok(());
                         } else {
                             // Normal RTP: feed into local audio sender
-                            local.receive_rtp(uuid, rtp_packet.clone()).await?;
+                            local
+                                .receive_rtp(uuid, packet_clone.clone())
+                                .await?;
                         }
                     }
                 }
@@ -4085,7 +4100,7 @@ impl StreamSender {
     }
 
     // Sender-side RTCP handler (video); ignore empty triggers, SRTP-encrypt if needed, and forward via transport
-    async fn receive_rtcp(&mut self, mut rtcp_packet: Vec<u8>) -> Result<()> {
+    async fn receive_rtcp(&mut self, rtcp_packet: Bytes) -> Result<()> {
         match self {
             StreamSender::AudioRemote(_remote) => {}
             StreamSender::AudioLocal(_) => {}
@@ -4098,19 +4113,22 @@ impl StreamSender {
                 if let Some(crypto) = video.crypto.as_mut() {
                     let index = crypto.next_rtcp_index().await;
                     let crypto = crypto.state.clone();
-                    rtcp_packet = nebula_task::spawn_task(move || {
-                        crypto.encrypt_rtcp(&rtcp_packet, index)
+                    let packet = rtcp_packet.to_vec();
+                    let encrypted = nebula_task::spawn_task(move || {
+                        crypto.encrypt_rtcp(&packet, index)
                     })
                     .await??;
+                    video.peer_transport.send(&encrypted).await?;
+                } else {
+                    video.peer_transport.send(&rtcp_packet).await?;
                 }
-                video.peer_transport.send(&rtcp_packet).await?;
             }
             StreamSender::VideoRemote(video) => {
                 if rtcp_packet.is_empty() {
                     return Ok(());
                 }
                 let mut packet = video.uuid.as_bytes().to_vec();
-                packet.extend_from_slice(rtcp_packet.as_slice());
+                packet.extend_from_slice(rtcp_packet.as_ref());
                 video
                     .remote_rtcp_udp
                     .send_to(&packet, &video.remote_rtcp_addr)
@@ -4124,7 +4142,7 @@ impl StreamSender {
     async fn receive_rtp(
         &mut self,
         source_id: Uuid,
-        rtp_packet: Vec<u8>,
+        rtp_packet: Bytes,
     ) -> Result<()> {
         match self {
             StreamSender::AudioRemote(remote) => {
@@ -4133,7 +4151,8 @@ impl StreamSender {
                 } else {
                     let mut ext = source_id.as_bytes().to_vec();
                     ext.extend_from_slice(remote.id.as_bytes());
-                    let mut pkt = RtpPacket::set_extension_pooled(&rtp_packet, &ext);
+                    let mut pkt =
+                        RtpPacket::set_extension_pooled(rtp_packet.as_ref(), &ext);
                     remote
                         .remote_udp
                         .send_to(&pkt[..], &remote.remote_addr)
@@ -4153,7 +4172,8 @@ impl StreamSender {
             StreamSender::VideoRemote(remote) => {
                 let mut ext = source_id.as_bytes().to_vec();
                 ext.extend_from_slice(remote.uuid.as_bytes());
-                let mut pkt = RtpPacket::set_extension_pooled(&rtp_packet, &ext);
+                let mut pkt =
+                    RtpPacket::set_extension_pooled(rtp_packet.as_ref(), &ext);
                 remote
                     .remote_rtp_udp
                     .send_to(&pkt[..], &remote.remote_rtp_addr)
@@ -4260,7 +4280,7 @@ impl VideoStreamSenderLocal {
     async fn receive_rtp(
         &mut self,
         src_uuid: Uuid,
-        rtp_packet: Vec<u8>,
+        rtp_packet: Bytes,
     ) -> Result<()> {
         let pt = self.rtpmap.type_number;
         let forward_state = self
@@ -4268,7 +4288,7 @@ impl VideoStreamSenderLocal {
             .entry(src_uuid)
             .or_insert_with(|| ForwardState::new(src_uuid, pt));
 
-        let incoming_rtp = RtpPacket::from_vec(rtp_packet);
+        let incoming_rtp = RtpPacket::from_bytes(rtp_packet);
         let incoming_vp8 = vp8::ParsedHeader::read(incoming_rtp.payload())?;
         let incoming_picture_id = incoming_vp8
             .picture_id

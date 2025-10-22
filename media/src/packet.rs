@@ -213,13 +213,12 @@ impl RtpPacket {
         marker >= 200 && marker <= 206
     }
 
-    // Wrap an existing RTP buffer without validation or copying
+    // Wrap an existing RTP buffer without validation, copying into BytesMut
     pub fn from_vec(buf: Vec<u8>) -> Self {
-        // Note: converts via slice to ensure BytesMut owns a fresh buffer
-        Self { inner: BytesMut::from(buf.as_slice()) }
+        Self { inner: BytesMut::from(&buf[..]) }
     }
 
-    // Wrap an existing RTP buffer from Bytes
+    // Wrap an existing RTP buffer from Bytes (copy into BytesMut)
     pub fn from_bytes(buf: Bytes) -> Self {
         Self { inner: BytesMut::from(&buf[..]) }
     }
