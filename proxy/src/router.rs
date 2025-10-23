@@ -1,3 +1,33 @@
+//! # SIP Message Router
+//! 
+//! This module handles SIP message routing decisions. It's the brain of the proxy,
+//! deciding where each SIP message should go based on user location, authentication,
+//! and routing rules.
+//! 
+//! ## Key Responsibilities
+//! 
+//! - **Route Decisions**: Determine where to send each SIP message
+//! - **User Lookup**: Find user locations in the database
+//! - **Authentication**: Verify user credentials before routing
+//! - **Load Balancing**: Distribute calls across multiple switchboard instances
+//! - **External Routing**: Route calls to external SIP providers
+//! 
+//! ## Routing Logic
+//! 
+//! 1. **Validate Message**: Check if the SIP message is well-formed
+//! 2. **Authenticate User**: Verify user credentials
+//! 3. **Lookup Destination**: Find where the called user is located
+//! 4. **Route Decision**: Choose the best path for the message
+//! 5. **Forward Message**: Send the message to the chosen destination
+//! 
+//! ## Common Routing Scenarios
+//! 
+//! - **Local to Local**: Both users in the same system
+//! - **Local to External**: Outbound call to external provider
+//! - **External to Local**: Inbound call from external provider
+//! - **Registration**: User location updates
+//! - **Presence**: User availability updates
+
 use crate::presence::Presence;
 
 use super::auth::Auth;
@@ -25,6 +55,13 @@ use sip::{message::Uri, transaction::TransactionType};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
+/// SIP message router that decides where to send each message
+/// 
+/// The router is the core component that makes routing decisions based on:
+/// - User authentication status
+/// - User location information
+/// - Call destination (local vs external)
+/// - Load balancing requirements
 pub struct Router {
     auth: Auth,
     usrloc: Usrloc,
