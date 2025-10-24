@@ -1,3 +1,7 @@
+// WebRTC Peer Connection
+// WebRTC peer connection for real-time media connections
+// Handles ICE connectivity, DTLS security and media stream management
+
 use std::{
     collections::HashMap,
     convert::TryInto,
@@ -31,6 +35,7 @@ use webrtc_util::Unmarshal;
 
 use crate::{
     dtls::DtlsTransport,
+    packet_pool::{PacketPool, PooledPacket},
     packet::RtpPacket,
     rtcp::RtcpPacket,
     server::MEDIA_SERVICE,
@@ -41,31 +46,35 @@ use crate::{
     },
 };
 
-const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
+// STUN protocol constants
+const STUN_MAGIC_COOKIE: u32 = 0x2112_A442; // STUN magic cookie for message validation
+
+// WebRTC peer connection events
+// These events are emitted during the peer connection lifecycle to notify about important state changes and connectioin events
 
 #[derive(strum_macros::Display, EnumString, PartialEq, Clone, Debug)]
 pub enum PeerConnectionEvent {
     #[strum(serialize = "dtls_done")]
-    DtlsDone,
+    DtlsDone,   //DTLS handshake completed successfully
     #[strum(serialize = "stop")]
     Stop,
 }
 
 #[derive(Clone, Debug)]
 pub enum PeerConnectionPoolMessage {
-    Packet(SocketAddr, Vec<u8>, Instant),
+    Packet(SocketAddr, PooledPacket, Instant),
     Stop(SocketAddr),
 }
 
 #[derive(Clone, Debug)]
 pub enum PeerConnectionMessage {
-    Packet(Vec<u8>, Instant),
+    Packet(PooledPacket, Instant),
     Event(PeerConnectionEvent),
 }
 
 #[derive(Clone, Debug)]
 pub enum PeerConnectionTrackMessage {
-    Packet(Vec<u8>, Instant),
+    Packet(PooledPacket, Instant),
 }
 
 pub struct PeerConnectionPool {
@@ -75,6 +84,8 @@ pub struct PeerConnectionPool {
 }
 
 impl PeerConnectionPool {
+
+    // Bind the shared UDP socket and prepare a pool for per-address peer connections
     pub async fn new(
         stream_sender_pool: UnboundedSender<StreamSenderPoolMessage>,
     ) -> Result<PeerConnectionPool> {
@@ -92,25 +103,32 @@ impl PeerConnectionPool {
         })
     }
 
+    // Main loop: reads UDP, routes packets to an existing connection or spawns a new one
     pub async fn run(&mut self) {
         let (pool_sender, mut pool_receiver) = unbounded_channel();
 
         let local_pool_sender = pool_sender.clone();
         let udp_socket = self.udp_socket.clone();
+
+        // UDP ingress -> queue as PoolMessage::Packet(addr, bytes, now)
         tokio::spawn(async move {
-            let mut buf = vec![0; 9000];
             loop {
-                if let Ok((n, addr)) = udp_socket.recv_from(&mut buf).await {
-                    let _ =
-                        local_pool_sender.send(PeerConnectionPoolMessage::Packet(
-                            addr,
-                            buf[..n].to_vec(),
-                            Instant::now(),
-                        ));
+                let mut buffer = PacketPool::acquire(9000);
+                buffer.ensure_len(9000);
+                if let Ok((n, addr)) =
+                    udp_socket.recv_from(&mut buffer.as_mut_slice()[..9000]).await
+                {
+                    let packet = buffer.into_packet_with_len(n);
+                    let _ = local_pool_sender.send(PeerConnectionPoolMessage::Packet(
+                        addr,
+                        packet,
+                        Instant::now(),
+                    ));
                 }
             }
         });
 
+        // Per-addr worker lifecycle:create on first packet; remove on Stop
         loop {
             if let Some(msg) = pool_receiver.recv().await {
                 match msg {
@@ -146,7 +164,7 @@ impl PeerConnectionPool {
                                 stream_sender_pool,
                             )
                             .await;
-                            let _ = pool_sender
+                    let _ = pool_sender
                                 .send(PeerConnectionPoolMessage::Stop(addr));
                         });
                     }
@@ -183,6 +201,8 @@ struct WebRTC {
 }
 
 impl WebRTC {
+
+    // Load channel metadata for this peer from Redis using the peer address
     async fn from_peer_addr(addr: SocketAddr) -> Result<Self> {
         let channel: String = REDIS
             .get(&format!("nebula:peer_connection:{}", addr))
@@ -190,6 +210,7 @@ impl WebRTC {
         Self::from_channel(channel).await
     }
 
+    // Build WebRTC  state (ICE/DTLS/tracks) from the channel's local/remote SDPs in Redis
     async fn from_channel(channel: String) -> Result<Self> {
         let remote_sdp: String = REDIS
             .hget(
@@ -263,8 +284,10 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
+    // Initialize a per-peer connection
+    // If no cached channel exists, treat the first packet as STUN and resolve the channel via USERNAME
     async fn new(
-        first_packet: Vec<u8>,
+        first_packet: PooledPacket,
         udp: Arc<UdpSocket>,
         peer_addr: SocketAddr,
         stream_sender_pool: UnboundedSender<StreamSenderPoolMessage>,
@@ -273,7 +296,7 @@ impl PeerConnection {
             webrtc
         } else {
             let stun_msg = MessageDecoder::<Attribute>::new()
-                .decode_from_bytes(&first_packet)?
+                .decode_from_bytes(first_packet.as_ref())?
                 .map_err(|e| anyhow!("{:?}", e))?;
             if stun_msg.class() != MessageClass::Request {
                 return Err(anyhow!("not stun request"))?;
@@ -303,8 +326,9 @@ impl PeerConnection {
         })
     }
 
+    // Per-peer task: handles DTLS, STUN and forwards RTP/RTCP to stream receivers
     async fn process_packets(
-        first_packet: Vec<u8>,
+        first_packet: PooledPacket,
         udp_socket: Arc<UdpSocket>,
         peer_addr: SocketAddr,
         sender: UnboundedSender<PeerConnectionMessage>,
@@ -339,6 +363,7 @@ impl PeerConnection {
         });
 
         let rtp_sender = conn.rtp_sender.clone();
+        // Drive connection until idle or closed; packets go through receive_packet, events via process_event
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {
@@ -371,10 +396,15 @@ impl PeerConnection {
         }
     }
 
-    async fn receive_packet(&mut self, packet: Vec<u8>, now: Instant) -> Result<()> {
+    // Classify and route a single UDP packet (STUN, DTLS or RTP/RTCP)
+    async fn receive_packet(
+        &mut self,
+        packet: PooledPacket,
+        now: Instant,
+    ) -> Result<()> {
         if is_stun_packet(&packet) {
             let stun_msg = MessageDecoder::<Attribute>::new()
-                .decode_from_bytes(&packet)?
+                .decode_from_bytes(packet.as_ref())?
                 .map_err(|e| anyhow!("{:?}", e))?;
             self.handle_stun(&stun_msg).await?;
             return Ok(());
@@ -382,7 +412,7 @@ impl PeerConnection {
 
         if is_dtls_packet(&packet) {
             if let Some(sender) = self.dtls_sender.as_ref() {
-                let _ = sender.send(packet).await;
+                let _ = sender.send(packet.to_vec()).await;
             } else {
                 let packet = { self.webrtc.dtls_last_packet.lock().await.clone() };
                 if packet.len() > 0 {
@@ -397,11 +427,12 @@ impl PeerConnection {
         }
 
         self.rtp_sender
-            .send(PeerConnectionTrackMessage::Packet(packet, now))?;
+            .send(PeerConnectionTrackMessage::Packet(packet.clone(), now))?;
 
         Ok(())
     }
 
+    // handle STUN binding requests/responses and kick off DTLS according to setup
     async fn handle_stun(
         &mut self,
         msg: &stun_codec::Message<Attribute>,
@@ -476,6 +507,7 @@ impl PeerConnection {
         Ok(())
     }
 
+    // Create a DTLS transport, shuttle DTLS records to/from UDP and derive SRTP keys
     async fn start_dtls(&mut self) -> Result<()> {
         if self.webrtc.dtls_done || self.webrtc.dtls_started {
             return Ok(());
@@ -584,6 +616,7 @@ impl PeerConnection {
         Ok(())
     }
 
+    // Consume Redis stream of peer-connection events and forward to the connection task
     async fn process_event(
         ice_id: &str,
         sender: UnboundedSender<PeerConnectionMessage>,
@@ -621,6 +654,7 @@ impl PeerConnection {
         Ok(())
     }
 
+    // Bridge incoming RTP/RTCP to a per-track `MediaStreamReceiver` (spawned on first packet)
     async fn process_rtp(&mut self) -> Result<()> {
         let mut rtp_receiver =
             self.rtp_receiver.take().ok_or(anyhow!("no rtp receiver"))?;

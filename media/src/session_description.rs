@@ -322,6 +322,7 @@ impl FromStr for MediaDescription {
 }
 
 impl MediaDescription {
+    /// Parse an SDP `m=` section into a `MediaDescription` (media kind, port, proto, payloads, attrs).
     pub fn parse_media(s: &str) -> Result<MediaDescription> {
         let parts: Vec<&str> = s.splitn(4, " ").collect();
         if parts.len() < 3 {
@@ -350,6 +351,7 @@ impl MediaDescription {
         Ok(media)
     }
 
+    /// Build a minimal RTP/AVP audio description with optional `mid` and provided `rtpmaps`.
     fn create_basic_audio(
         port: u16,
         mid: Option<String>,
@@ -372,6 +374,7 @@ impl MediaDescription {
         media
     }
 
+    /// Create a WebRTC video `MediaDescription` (SAVPF) with SSRC, MID, msid, and rtpmap lines.
     pub fn create_video(
         rtpmaps: Vec<Rtpmap>,
         ssrc: u32,
@@ -400,6 +403,7 @@ impl MediaDescription {
         media
     }
 
+    /// Create an audio `MediaDescription` for WebRTC or plain RTP, picking port/proto and crypto as needed.
     async fn create_audio(
         channel_id: &str,
         webrtc: bool,
@@ -451,20 +455,24 @@ impl MediaDescription {
         Ok(media)
     }
 
+    /// Set audio packetization time (in ms) as an SDP `ptime` attribute.
     pub fn set_ptime(&mut self, ptime: usize) {
         self.insert_attribute("ptime".to_string(), Some(ptime.to_string()));
     }
 
+    /// Get `ptime` if present, defaulting to 20ms when missing or invalid.
     pub fn ptime(&self) -> usize {
         self.attribute("ptime")
             .and_then(|ptime| ptime.parse::<usize>().ok())
             .unwrap_or(20)
     }
 
+    /// Return the value of the first attribute with `key` (session-local to this media).
     pub fn attribute(&self, key: &str) -> Option<String> {
         attribute(&self.attributes, key)
     }
 
+    /// True if this media has any `a={key}` attribute, regardless of value.
     pub fn has_attribute(&self, key: &str) -> bool {
         for attr in &self.attributes {
             if &attr.key == key {
@@ -474,14 +482,17 @@ impl MediaDescription {
         false
     }
 
+    /// Extract minimal ICE credentials from media attributes (`ice-ufrag`/`ice-pwd`).
     pub fn ice(&self) -> Option<Ice> {
         extract_ice(&self.attributes)
     }
 
+    /// Extract DTLS info (`setup`, `fingerprint`) from media attributes.
     pub fn dtls(&self) -> Option<Dtls> {
         extract_dtls(&self.attributes)
     }
 
+    /// Derive a stable UUID for this media using `channel:(mid|port)` via `uuid_v5`.
     pub fn uuid(&self, channel: &str) -> Uuid {
         let id = if let Some(mid) = self.mid() {
             format!("{}:{}", &channel, mid)
@@ -491,10 +502,12 @@ impl MediaDescription {
         uuid_v5(&id)
     }
 
+    /// Return SDP `mid` if set for this media.
     pub fn mid(&self) -> Option<String> {
         self.attribute("mid")
     }
 
+    /// Parse all `a=crypto` lines into `Crypto` entries (ignoring invalid lines).
     pub fn cryptos(&self) -> Vec<Crypto> {
         let mut cryptos = Vec::new();
         for attr in &self.attributes {
@@ -511,6 +524,7 @@ impl MediaDescription {
         cryptos
     }
 
+    /// Find an `Rtpmap` by payload type name (e.g., Opus, G722) using payloads + attributes.
     pub fn get_rtpmap(&self, name: &PayloadType) -> Option<Rtpmap> {
         for pt in &self.payloads {
             if let Some(rtpmap) = self.pt_rtpmap(pt) {
@@ -522,6 +536,7 @@ impl MediaDescription {
         None
     }
 
+    /// Return the DTMF `telephone-event` rtpmap if present.
     pub fn dtmf_rtpmap(&self) -> Option<Rtpmap> {
         for pt in &self.payloads {
             if let Some(rtpmap) = self.pt_rtpmap(&pt) {
@@ -533,6 +548,7 @@ impl MediaDescription {
         None
     }
 
+    /// Resolve an `Rtpmap` by dynamic PT number, using defaults and matching rtpmap/fmtp/rtcp-fb lines.
     pub fn pt_rtpmap(&self, pt: &str) -> Option<Rtpmap> {
         Rtpmap::pt_default(pt).or_else(|| {
             let mut rtpmap = None;
@@ -574,6 +590,7 @@ impl MediaDescription {
         })
     }
 
+    /// Get media direction (`sendrecv` by default) from attributes like `sendonly`/`recvonly`.
     pub fn mode(&self) -> MediaMode {
         for attribute in &self.attributes {
             if let Ok(mode) = MediaMode::from_str(&attribute.key) {
@@ -583,10 +600,12 @@ impl MediaDescription {
         MediaMode::Sendrecv
     }
 
+    /// True if this media uses WebRTC profile (`UDP/TLS/RTP/SAVPF`).
     pub fn is_webrtc(&self) -> bool {
         self.proto == "UDP/TLS/RTP/SAVPF"
     }
 
+    /// Build an answer `MediaDescription` for this offer, choosing ports, MID, (D)TLS/ICE, and negotiated codecs.
     pub async fn create_answer(
         &self,
         channel_id: &str,
@@ -673,6 +692,7 @@ impl MediaDescription {
         Ok(media)
     }
 
+    /// Add ICE `ufrag`/`pwd` and host candidates with this media's port.
     pub fn insert_ice(&mut self, ice: &Ice) {
         self.insert_attribute("ice-ufrag".to_string(), Some(ice.ufrag.clone()));
         self.insert_attribute("ice-pwd".to_string(), Some(ice.pwd.clone()));
@@ -692,6 +712,7 @@ impl MediaDescription {
         }
     }
 
+    /// Populate `a=ssrc` attributes (cname, msid, labels) for a track.
     fn insert_ssrc(&mut self, ssrc: u32, stream_id: String, track_id: String) {
         self.insert_attribute(
             "ssrc".to_string(),
@@ -711,10 +732,12 @@ impl MediaDescription {
         );
     }
 
+    /// Set the `mid` for this media.
     pub fn insert_mid(&mut self, mid: String) {
         self.insert_attribute("mid".to_string(), Some(mid));
     }
 
+    /// Add `msid` linking stream and track identifiers.
     fn insert_msid(&mut self, stream_id: String, track_id: String) {
         self.insert_attribute(
             "msid".to_string(),
@@ -722,6 +745,7 @@ impl MediaDescription {
         );
     }
 
+    /// Add DTLS fingerprint and setup role attributes.
     pub fn insert_dtls(&mut self, dtls: &Dtls) {
         self.insert_attribute(
             "fingerprint".to_string(),
@@ -730,6 +754,7 @@ impl MediaDescription {
         self.insert_attribute("setup".to_string(), Some(dtls.setup.clone()));
     }
 
+    /// Replace any existing direction with the provided mode (e.g., `sendrecv`).
     pub fn set_mode(&mut self, mode: MediaMode) {
         let mut new_attributes = Vec::new();
         for attribute in &self.attributes {
@@ -742,6 +767,7 @@ impl MediaDescription {
         self.insert_attribute(mode.to_string(), None);
     }
 
+    /// Remove all rtpmap/fmtp pairs and reset payloads, preserving only non-codec attributes.
     pub fn clear_rtpmap(&mut self) {
         let mut new_attributes = Vec::new();
         for attribute in &self.attributes {
@@ -754,6 +780,7 @@ impl MediaDescription {
         self.attributes = new_attributes;
     }
 
+    /// Append rtpmap/fmtp/rtcp-fb lines and payload type for a codec.
     pub fn insert_rtpmap(&mut self, rtpmap: &Rtpmap) {
         self.payloads.push(rtpmap.type_number.to_string());
         self.attributes.push(Attribute {
@@ -784,10 +811,12 @@ impl MediaDescription {
         }
     }
 
+    /// Append an arbitrary SDP attribute to this media.
     pub fn insert_attribute(&mut self, key: String, value: Option<String>) {
         self.attributes.push(Attribute { key, value });
     }
 
+    /// Choose the first mutually supported codec between two media sections (by name).
     pub fn negotiate_rtpmap(
         &self,
         other_media: &MediaDescription,
@@ -806,6 +835,7 @@ impl MediaDescription {
         None
     }
 
+    /// Pick codec for answer: prefer peer's order, otherwise our preferred order per media type.
     fn answer_rtpmap(
         &self,
         peer_rtpmaps: Option<Vec<Rtpmap>>,
@@ -851,6 +881,7 @@ pub struct SessionDescription {
 }
 
 impl SessionDescription {
+    /// Create a base SDP with local media IP, empty attributes, and no media lines.
     pub fn new() -> SessionDescription {
         SessionDescription {
             version: "0".to_string(),
@@ -875,6 +906,7 @@ impl SessionDescription {
         }
     }
 
+    /// Return the MID list from a `group:BUNDLE` attribute if present.
     pub fn bundle(&self) -> Option<Vec<String>> {
         for attr in &self.attributes {
             if &attr.key == "group"
@@ -893,10 +925,12 @@ impl SessionDescription {
         None
     }
 
+    /// Convenience accessor for the media descriptions.
     pub fn medias(&self) -> &Vec<MediaDescription> {
         &self.media_descriptions
     }
 
+    /// Return the first video media, if any.
     pub fn video(&self) -> Option<&MediaDescription> {
         for media in self.medias() {
             if media.media_type == MediaType::Video {
@@ -906,6 +940,7 @@ impl SessionDescription {
         None
     }
 
+    /// Return the first audio media, if any.
     pub fn audio(&self) -> Option<&MediaDescription> {
         for media in self.medias() {
             if media.media_type == MediaType::Audio {
@@ -915,6 +950,7 @@ impl SessionDescription {
         None
     }
 
+    /// Mutable access to the first audio media, if any.
     pub fn audio_mut(&mut self) -> Option<&mut MediaDescription> {
         for media in self.media_descriptions.iter_mut() {
             if media.media_type == MediaType::Audio {
@@ -924,6 +960,7 @@ impl SessionDescription {
         None
     }
 
+    /// Build a MID->track map by reading `ssrc-group`, `msid`, and `ssrc` lines (skip RTX repair flows).
     pub fn media_stream_tracks(&self) -> HashMap<String, MediaStreamTrack> {
         let mut rtx_repair_flows = HashMap::new();
         let mut tracks = HashMap::new();
@@ -994,6 +1031,7 @@ impl SessionDescription {
         tracks
     }
 
+    /// Look up a media section by its `mid`.
     pub fn mid(&self, mid: String) -> Option<&MediaDescription> {
         for media in self.medias() {
             if media.mid().as_ref() == Some(&mid) {
@@ -1003,10 +1041,12 @@ impl SessionDescription {
         None
     }
 
+    /// Get media by index.
     pub fn media(&self, i: usize) -> Option<&MediaDescription> {
         self.medias().get(i)
     }
 
+    /// Create a one-media (audio) SDP with provided port, optional MID, and codecs.
     pub fn create_basic(
         audio_port: u16,
         audio_mid: Option<String>,
@@ -1022,6 +1062,7 @@ impl SessionDescription {
         Self::with_medias(medias, None)
     }
 
+    /// Build an SDP offer: fills audio media, and for WebRTC adds DTLS/ICE and BUNDLE.
     pub async fn create_offer(
         channel_id: &str,
         webrtc: bool,
@@ -1047,6 +1088,7 @@ impl SessionDescription {
         Ok(Self::with_medias(medias, dtls_ice))
     }
 
+    /// Assemble the final SDP from medias; optionally inject DTLS/ICE and BUNDLE group.
     fn with_medias(
         mut medias: Vec<MediaDescription>,
         dtls_ice: Option<(Dtls, Ice)>,
@@ -1074,6 +1116,7 @@ impl SessionDescription {
         sdp
     }
 
+    /// Reset peer state to plain RTP/AVP and optional local RTP port, preserving only rtpmap/fmtp/mid.
     pub fn reset_peer(&mut self, reset_rtp_port: bool) {
         self.attributes = Vec::new();
         for media in self.media_descriptions.iter_mut() {
@@ -1091,6 +1134,7 @@ impl SessionDescription {
         }
     }
 
+    /// Create a minimal local peer SDP (audio on local RTP peer port with one codec).
     pub fn create_local_peer(rtpmap: Rtpmap) -> SessionDescription {
         let mut media = MediaDescription {
             media_type: MediaType::Audio,
@@ -1111,6 +1155,7 @@ impl SessionDescription {
         sdp
     }
 
+    /// Build an SDP answer for all medias, negotiating codecs and adding DTLS/ICE when present.
     pub async fn create_answer(
         &self,
         channel_id: &str,
@@ -1168,6 +1213,7 @@ impl SessionDescription {
         Ok(answer_sdp)
     }
 
+    /// Collect all `Rtpmap`s for a given `MediaType` from this SDP.
     pub fn get_rtpmaps(&self, media_type: &MediaType) -> Option<Vec<Rtpmap>> {
         for media in self.medias() {
             if &media.media_type == media_type {
@@ -1183,6 +1229,7 @@ impl SessionDescription {
         None
     }
 
+    /// Append a session-level SDP attribute.
     pub fn insert_attribute(&mut self, key: String, value: Option<String>) {
         self.attributes.push(Attribute { key, value });
     }
@@ -1338,6 +1385,7 @@ impl SessionDescription {
     }
 }
 
+/// Generate DTLS parameters using the cached certificate fingerprint and provided setup role.
 async fn new_dtls(setup: String) -> Result<Dtls> {
     let fingerprint = get_cert_fingerprint().await?;
     Ok(Dtls {
@@ -1347,6 +1395,7 @@ async fn new_dtls(setup: String) -> Result<Dtls> {
     })
 }
 
+/// Create a simple host-only ICE block using the local media IP (with dual-stack address forms).
 fn new_ice() -> Ice {
     let foundation = nebula_utils::rand_number(10);
     let octets = MEDIA_SERVICE.config.media_ip.octets();
@@ -1378,6 +1427,7 @@ fn new_ice() -> Ice {
     }
 }
 
+/// Allocate a new RTP port in [10000,40000] with a Redis lock, even across processes.
 async fn new_session_port(channel_id: &str) -> Result<u16> {
     let key = "nebula:media:port";
     loop {
@@ -1399,6 +1449,7 @@ async fn new_session_port(channel_id: &str) -> Result<u16> {
     }
 }
 
+/// Generate a random 32-bit SSRC value.
 fn new_ssrc() -> u32 {
     let mut buffer = [0; 4];
     rand::thread_rng().fill_bytes(&mut buffer);

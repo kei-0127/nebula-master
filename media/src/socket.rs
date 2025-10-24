@@ -1,3 +1,25 @@
+// Raw Socket Implementation
+// 
+// This module provides raw socket functionality for low-level network
+// packet handling. Raw sockets allow direct access to network packets
+// at the IP layer, enabling custom protocol implementations and
+// network-level packet manipulation.
+// 
+// Key Features
+// 
+// - Raw IP Sockets: Direct access to IP layer packets
+// - UDP Raw Sockets: Raw UDP packet handling
+// - Async Operations: Non-blocking socket operations
+// - Packet Manipulation: Direct packet header access
+// - Low-level Control: Fine-grained network control
+// 
+// Use Cases
+// 
+// - Custom Protocols: Implement custom network protocols
+// - Packet Analysis: Analyze network traffic at IP level
+// - Network Testing: Test network behavior and responses
+// - Protocol Development: Develop new network protocols
+
 use libc;
 use nix::sys::socket::SockAddr;
 use std::future::Future;
@@ -9,11 +31,14 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Poll::Pending, Poll::Ready};
 use tokio::io::unix::AsyncFd;
 
+// Async raw IPv4 socket
+// Provides direct IP-level acces; `udp=true` uses IPPROTO_UDP, `udp=false` uses raw IP with IP_HDRINCL
 pub struct RawSocket {
-    fd: AsyncFd<RawFd>,
+    fd: AsyncFd<RawFd>, // Async file descriptor wrapper
 }
 
 impl Drop for RawSocket {
+    /// Clean up raw socket resources
     fn drop(&mut self) {
         unsafe {
             libc::close(self.fd.as_raw_fd());
@@ -22,6 +47,10 @@ impl Drop for RawSocket {
 }
 
 impl RawSocket {
+
+    // Create a raw IPv4 socket
+    // `udp=true` opens IPPROTO_UDP; `udp=false` opens raw IP with IP_HDRINCL.
+    // Socket is non-blocking
     pub fn new(udp: bool) -> Result<RawSocket> {
         let fd = if udp {
             unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_UDP) }
@@ -47,10 +76,12 @@ impl RawSocket {
         })
     }
 
+    // Async receive: fills `buf` with the next packet and returns its length
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         poll_fn(|cx| self.poll_recv(cx, buf)).await
     }
 
+    // Poll-based receive used by `recv`; clears readiness on EWoULDBLOCK and retries
     pub fn poll_recv(
         &self,
         cx: &mut Context<'_>,
@@ -86,10 +117,12 @@ impl RawSocket {
         }
     }
 
+    // Async sendto: writes `buf` to `target` and returns bytes sent
     pub async fn send_to(&self, buf: &[u8], target: &SockAddr) -> io::Result<usize> {
         poll_fn(|cx| self.poll_send_to(cx, buf, target)).await
     }
 
+    // Poll-based send used by `send_to`; clears readiness on EWOULDBLOCK and retries
     pub fn poll_send_to(
         &self,
         cx: &mut Context<'_>,
@@ -129,6 +162,7 @@ impl RawSocket {
     }
 }
 
+// Minimal future adapter that polls a closure until it returns `Ready`
 struct PollFn<F> {
     f: F,
 }
@@ -146,6 +180,7 @@ where
     }
 }
 
+// Build a `Future` from a polling clossure
 fn poll_fn<T, F>(f: F) -> PollFn<F>
 where
     F: FnMut(&mut Context<'_>) -> Poll<T>,

@@ -1,3 +1,37 @@
+//! # SIP Transaction Management
+//! 
+//! This module implements the SIP transaction layer as defined in RFC 3261.
+//! It manages the lifecycle of SIP transactions, including client and server
+//! transactions, state machines, and message routing.
+//! 
+//! ## Key Components
+//! 
+//! - **TransactionManager**: Central coordinator for all SIP transactions
+//! - **Transaction**: Individual SIP transaction with state management
+//! - **TransactionKey**: Unique identifier for transactions
+//! - **TransactionType**: Client or server transaction classification
+//! 
+//! ## Transaction Lifecycle
+//! 
+//! 1. **Creation**: Transaction is created when a SIP request/response is received
+//! 2. **State Management**: Transaction moves through various states (Trying, Proceeding, etc.)
+//! 3. **Message Routing**: Messages are routed based on transaction state
+//! 4. **Termination**: Transaction is terminated after completion or timeout
+//! 
+//! ## State Machine
+//! 
+//! The transaction follows RFC 3261 state machines:
+//! - **Client Transaction**: INVITE, Non-INVITE client transactions
+//! - **Server Transaction**: INVITE, Non-INVITE server transactions
+//! 
+//! ## Error Handling
+//! 
+//! Transactions handle various error conditions:
+//! - Timeout handling with T1, T2, T4 timers
+//! - Retransmission logic
+//! - Error response handling
+//! - Transaction cleanup
+
 use super::fsm::{self, Input, State};
 use super::message::{Address, MessageError, Method};
 use super::message::{Cseq, Message, Uri, Via};
@@ -22,6 +56,7 @@ use strum_macros::EnumString;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+// Constants for Redis key prefixes and transaction state management
 const STATE: &str = "state";
 const REQUEST: &str = "request";
 const RESPONSE: &str = "response";
@@ -31,12 +66,25 @@ const ADDR_IP: &str = "addr_ip";
 const ADDR_PORT: &str = "addr_port";
 const ADDR_TYPE: &str = "addr_type";
 const ADDR_IS_PROVIDER: &str = "addr_is_provider";
+
+// SIP Timer Constants (RFC 3261)
+// T1: Base retransmission timer (500ms default, 150ms for testing)
 const T1: Duration = Duration::from_millis(150);
 
+// Global Transaction Manager instance
+// This singleton manages all SIP transactions across the system
 lazy_static! {
     pub static ref TM: TransactionManager = TransactionManager::new();
 }
 
+/// SIP Transaction Error Types
+/// 
+/// These errors can occur during transaction management:
+/// - TransactionNotExist: Attempted to access a non-existent transaction
+/// - TransactionExist: Attempted to create a transaction that already exists
+/// - TransactionNotValidMessage: Invalid SIP message for the transaction
+/// - AddrInvalid: Invalid address information in the transaction
+/// - RouteStop: Message routing was stopped (e.g., due to security policy)
 #[derive(Debug, Error)]
 pub enum TransactionError {
     #[error("transaction not exit")]
@@ -51,17 +99,38 @@ pub enum TransactionError {
     RouteStop,
 }
 
+/// SIP Transaction Type Classification
+/// 
+/// According to RFC 3261, SIP transactions are classified as:
+/// - **Client**: Transactions initiated by sending a request (UAC behavior)
+/// - **Server**: Transactions initiated by receiving a request (UAS behavior)
+/// 
+/// This classification determines the state machine and behavior of the transaction.
 #[derive(strum_macros::Display, EnumString, PartialEq, Eq, Clone, Debug)]
 pub enum TransactionType {
     Client,
     Server,
 }
 
+/// SIP Transaction Structure
+/// 
+/// Represents an individual SIP transaction with its unique identifier.
+/// The transaction contains the key information needed to manage its lifecycle.
 #[derive(Clone, Debug)]
 pub struct Transaction {
     pub key: TransactionKey,
 }
 
+/// SIP Transaction Key
+/// 
+/// Unique identifier for a SIP transaction, composed of:
+/// - **branch**: Via header branch parameter (RFC 3261)
+/// - **method**: SIP method (INVITE, REGISTER, etc.)
+/// - **callid**: Call-ID header value
+/// - **tx_type**: Client or server transaction type
+/// - **encoded**: Base64-encoded key for Redis storage
+/// 
+/// The combination of these fields ensures uniqueness across the system.
 #[derive(Clone, Debug)]
 pub struct TransactionKey {
     branch: String,
@@ -71,6 +140,19 @@ pub struct TransactionKey {
     encoded: String,
 }
 
+/// SIP Transaction Manager
+/// 
+/// Central coordinator for all SIP transactions in the system. This manager:
+/// - Maintains active transaction state in Redis
+/// - Handles message routing between components
+/// - Manages transport layer connections
+/// - Provides API for transaction operations
+/// 
+/// ## Components
+/// - **transport**: Manages UDP, TCP, TLS, and WebSocket connections
+/// - **router_sender**: Sends messages to the routing layer
+/// - **router_receiver**: Receives messages from the routing layer
+/// - **api_receiver**: Receives API commands for transaction management
 pub struct TransactionManager {
     pub transport: TransportManager,
     router_sender: Sender<Message>,

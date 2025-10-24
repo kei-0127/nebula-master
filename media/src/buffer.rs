@@ -1,3 +1,8 @@
+//! # Media Buffer Management
+//! 
+//! Audio/video buffer management for real-time media processing.
+//! Provides jitter buffers, sequence-ordered queues, and audio processing buffers.
+
 use crate::{packet::RtpPacket, server::MEDIA_SERVICE};
 use anyhow::Result;
 use codec::Codec;
@@ -9,18 +14,18 @@ use tracing::warn;
 
 use crate::resampler::Resampler;
 
-const MAX_ROCDISORDER: u16 = 100;
-const MAX_SEQUENCE_NUMBER: u16 = 65535;
+// Buffer configuration constants
+const MAX_ROCDISORDER: u16 = 100;        // Max out-of-order packets
+const MAX_SEQUENCE_NUMBER: u16 = 65535;  // Max RTP sequence number
+const MIN_JITTER_BUFFER_SIZE: usize = 2;           // Min packets in buffer
+const ABUNDANT_JITTER_BUFFER_SIZE: usize = 2;      // Abundant buffer size
+const ABUNDANT_JITTER_BUFFER_TIMES: usize = 500;   // Times to maintain abundant buffer
+const MAX_JITTER_BUFFER_SIZE: usize = 10;          // Max packets in buffer
 
-const MIN_JITTER_BUFFER_SIZE: usize = 2;
-const ABUNDANT_JITTER_BUFFER_SIZE: usize = 2;
-const ABUNDANT_JITTER_BUFFER_TIMES: usize = 500;
-const MAX_JITTER_BUFFER_SIZE: usize = 10;
-
-/// SeqQueue is an unbounded queue with the order
-/// by the sequence
+/// Sequence-ordered queue for RTP packets
+/// Maintains packets in sequence order, handling out-of-order delivery
 pub struct SeqQueue<I> {
-    queue: VecDeque<(I, usize)>,
+    queue: VecDeque<(I, usize)>,  // (item, sequence_number) pairs
 }
 
 impl<I> Default for SeqQueue<I> {
@@ -46,9 +51,11 @@ impl<I> SeqQueue<I> {
         self.queue.is_empty()
     }
 
-    /// push a new item to the queue, the biggest seq is at the most left
+    /// Insert item into queue maintaining sequence order
+    /// Highest sequence numbers go to front of queue
     pub fn push(&mut self, item: I, seq: usize) {
         let mut index = None;
+        // Find insertion point based on sequence number
         for (i, (_, s)) in self.queue.iter().enumerate() {
             if seq > *s {
                 index = Some(i);
@@ -63,17 +70,19 @@ impl<I> SeqQueue<I> {
         }
     }
 
-    /// pop an item from the queue, it's the smallest seq
+    /// Remove and return the oldest item (lowest sequence number)
     pub fn pop(&mut self) -> Option<(I, usize)> {
         self.queue.pop_back()
     }
 }
 
+/// Fixed-size circular buffer for audio data
+/// Reuses pre-allocated buffers to minimize memory allocation overhead
 pub struct FixedDqueue {
-    start: usize,
-    n: Option<usize>,
-    size: usize,
-    elements: Vec<Vec<u8>>,
+    start: usize,                    // Starting index in circular buffer
+    n: Option<usize>,                // Current position index
+    size: usize,                     // Total buffer size
+    elements: Vec<Vec<u8>>,           // Pre-allocated audio buffers
 }
 
 impl FixedDqueue {

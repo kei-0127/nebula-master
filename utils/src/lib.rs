@@ -1,3 +1,44 @@
+//! # Utilities Module
+//! 
+//! This module provides common utility functions used throughout the Nebula VoIP system.
+//! It includes cryptographic functions, random number generation, UUID generation,
+//! and system information utilities.
+//! 
+//! ## Key Features
+//! 
+//! ### Cryptographic Functions
+//! - **MD5**: MD5 hash generation for legacy compatibility
+//! - **SHA1**: SHA-1 hash generation for checksums
+//! - **SHA256**: SHA-256 hash generation for security
+//! 
+//! ### Random Generation
+//! - **Random Numbers**: Secure random number generation
+//! - **Random Strings**: Alphanumeric string generation
+//! - **Random Bytes**: Cryptographically secure random bytes
+//! 
+//! ### UUID Generation
+//! - **UUID v4**: Random UUID generation
+//! - **UUID v5**: Namespace-based UUID generation
+//! 
+//! ### System Information
+//! - **Hostname**: System hostname retrieval
+//! - **Local IP**: Primary local IP address detection
+//! 
+//! ## Usage
+//! 
+//! ```rust
+//! use nebula_utils::{sha256, uuid, get_local_ip};
+//! 
+//! // Generate hash
+//! let hash = sha256("hello world");
+//! 
+//! // Generate UUID
+//! let id = uuid();
+//! 
+//! // Get system information
+//! let ip = get_local_ip();
+//! ```
+
 use std::process::Command;
 
 use crypto::digest::Digest;

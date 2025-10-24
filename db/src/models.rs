@@ -1,5 +1,5 @@
 use crate::api::{is_channel_answered, user_dialogs};
-use crate::aux::{format_aux_records, AuxRecord};
+use crate::auxiliary::{format_aux_records, AuxRecord};
 use crate::message::{
     DialogState, UserPresence, UserPresenceDetails, UserRegistration,
 };

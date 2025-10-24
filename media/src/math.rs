@@ -1,5 +1,10 @@
+//! # Mathematical Utilities
+//! 
+//! Mathematical utility functions for media processing and signal analysis.
+
 use std::ops::{Add, Mul, Sub};
 
+/// Round `n` up to the next multiple of `M` — handy for buffer sizes/alignment.
 pub fn round_up_to_multiple_of<const M: usize>(n: usize) -> usize {
     (n + (M - 1)) / M * M
 }
@@ -36,7 +41,9 @@ mod round_up_multiple_of_n_tests {
     }
 }
 
+/// Give numbers a simple `.square()` method (multiply a value by itself).
 pub trait Square: Copy + Mul + Sized {
+    /// Square the value (multiply by itself)
     fn square(self) -> Self::Output {
         self * self
     }
@@ -60,6 +67,7 @@ mod square_tests {
 }
 
 pub trait AbsDiff: PartialOrd + Sub + Sized {
+    /// Absolute difference without worrying about order: `a.abs_diff(b)`.
     fn abs_diff(self, other: Self) -> Self::Output {
         if self > other {
             self - other
@@ -106,6 +114,7 @@ mod abs_diff_tests {
     }
 }
 
+/// Blend the previous average toward a new value by `alpha` in [0,1].
 pub fn exponential_moving_average<T: Mul<f64, Output = T> + Add<T, Output = T>>(
     average: T,
     alpha: f64,

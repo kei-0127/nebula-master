@@ -1,3 +1,18 @@
+//! Bitrate estimation from ACKs (hub for rate signals into GoogCC)
+//!
+//! This module consumes a stream of `Ack` events and turns them into a smoothed
+//! bitrate estimate used by the congestion controller. It first groups ACKs into
+//! short windows to resist burstiness (500ms for the first group, then 150ms),
+//! then converts each group to an instantaneous bitrate (bytes / duration), and
+//! finally smooths those samples with a simple variance‑weighted blend (a
+//! lightweight Kalman‑style update).
+//!
+//! Notes:
+//! - Out‑of‑order arrivals reset the current group, avoiding misleading spikes.
+//! - If there is a long gap, the group resets and leftover time carries to the
+//!   next group window so the estimator remains responsive.
+//! - The result stream can be wrapped with `latest_only()` (as GoogCC does)
+//!   to always consume the freshest estimate without lag.
 use std::time::Duration;
 
 use async_stream::stream;
@@ -9,6 +24,7 @@ use crate::{
     transportcc::Ack,
 };
 
+/// Group ACKs over short windows and sum their bytes and duration.
 fn accumulate_acked_sizes(
     acks: impl Stream<Item = Ack>,
 ) -> impl Stream<Item = (DataSize, Duration)> {
@@ -56,6 +72,7 @@ fn accumulate_acked_sizes(
     }
 }
 
+/// Turn grouped (size, duration) into a smoothed bitrate estimate (simple Kalman-like blend).
 fn estimate_acked_rates_from_groups(
     ack_groups: impl Stream<Item = (DataSize, Duration)>,
 ) -> impl Stream<Item = DataRate> {
@@ -81,6 +98,7 @@ fn estimate_acked_rates_from_groups(
     }
 }
 
+/// Public entry: estimate bitrate from a stream of `Ack`s.
 pub fn estimate_acked_rates(
     acks: impl Stream<Item = Ack>,
 ) -> impl Stream<Item = DataRate> {

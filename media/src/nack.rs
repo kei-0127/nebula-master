@@ -1,7 +1,30 @@
+// Negative Acknowledgment (NACK) Implementation
+// 
+// This module provides Negative Acknowledgment (NACK) functionality for
+// RTP packet loss detection and recovery. NACK allows receivers to request
+// retransmission of lost packets, improving media quality and reliability.
+// 
+// Key Features
+// 
+// - Packet Loss Detection: Detect missing RTP packets by sequence number
+// - NACK Generation: Generate NACK messages for lost packets
+// - Retransmission Requests: Request retransmission of lost packets
+// - Sequence Tracking: Track received packet sequence numbers
+// - Loss Recovery: Improve media quality through packet recovery
+// 
+// NACK Process
+// 
+// 1. Packet Reception: Track received packet sequence numbers
+// 2. Loss Detection: Identify missing sequence numbers
+// 3. NACK Generation: Create NACK messages for lost packets
+// 4. Retransmission: Request sender to retransmit lost packets
+// 5. Recovery: Receive and process retransmitted packets
+
 use std::time::{Duration, Instant};
 
 use crate::key_sorted_cache::KeySortedCache;
 
+// Tracks whch RTP packets arrived and which went missing and tells you which ones to NACK
 pub struct NackSender {
     limit: usize,
     sent_by_seqnum: KeySortedCache<u64, Option<(Instant, Instant)>>,
@@ -9,6 +32,8 @@ pub struct NackSender {
 }
 
 impl NackSender {
+
+    // Start a NACK tracker; `limit` bounds how many sequence numbers we remember at once
     pub fn new(limit: usize) -> Self {
         Self {
             limit,
@@ -55,6 +80,8 @@ impl NackSender {
         }
     }
 
+    // Return the sequence numbers that should be NACKed now, obeying simple rate limits
+    // Entries expire after ~2s; if still missing, we ask every ~200ms
     #[allow(clippy::needless_lifetimes)]
     pub fn send_nacks<'sender>(
         &'sender mut self,

@@ -13,9 +13,14 @@ use webrtc_util::{Marshal, MarshalSize};
 
 use crate::{date_rate::DataSize, two_generation_cache::TwoGenerationCache};
 
+/// Transport-CC timing constants (per RTP Transport Layer CC draft).
+///
+/// Reference time uses 64 ms ticks (250 µs × 256); per-packet deltas use 250 µs ticks.
 const MICROS_PER_REFERENCE_TICK: u16 = 250 << 8;
 const MICROS_PER_DELTA_TICK: u16 = 250;
 
+/// Receiver-side Transport-CC helper that remembers packet arrivals and
+/// periodically emits RTCP `TransportLayerCc` feedbacks.
 pub struct TccReceiver {
     sender_ssrc: u32,
     // The timestamps of ACKs are all based off of this time.
@@ -28,6 +33,7 @@ pub struct TccReceiver {
 }
 
 impl TccReceiver {
+    /// Create a receiver bound to a given sender SSRC and time epoch.
     pub fn new(sender_ssrc: u32, epoch: Instant) -> Self {
         Self {
             sender_ssrc,
@@ -39,6 +45,9 @@ impl TccReceiver {
         }
     }
 
+    /// Remember the arrival time of a packet with truncated 16-bit sequence number.
+    ///
+    /// Expands to a full sequence by tracking rollovers relative to the max seen.
     pub fn remember_received(&mut self, seq: u16, arrival: Instant) {
         let tcc = expand_truncated_counter(seq, &mut self.max_received_seqnum, 16);
         if let btree_map::Entry::Vacant(entry) = self.unacked_arrival.entry(tcc) {
@@ -46,6 +55,8 @@ impl TccReceiver {
         }
     }
 
+    /// Heuristic to decide when to send a feedback: either enough unacked
+    /// arrivals or a short timeout (100ms) since the last feedback.
     pub fn should_send_feedback(&mut self) -> bool {
         if self.unacked_arrival.len() > 5
             || self.last_feedback.elapsed().as_millis() > 100
@@ -58,6 +69,8 @@ impl TccReceiver {
     }
 
     #[allow(clippy::needless_lifetimes)]
+    /// Drain remembered arrivals into one or more `TransportLayerCc` feedback
+    /// packets, respecting symbol sizes and a conservative packet size limit.
     pub fn feedbacks<'a>(
         &'a mut self,
         media_ssrc: u32,
@@ -97,7 +110,7 @@ impl TccReceiver {
                     + symbol_lists.len()
                     > 1100
                 {
-                    // The RTCP packet is getting too big.  Let's cap it off and send another one.
+                    // Cap packet size conservatively; start a new feedback packet.
                     break;
                 }
                 for _ in (prev_seqnum + 1)..seqnum {
@@ -130,7 +143,7 @@ impl TccReceiver {
                         symbol_lists.push(SymbolTypeTcc::PacketReceivedLargeDelta);
                     }
                     _ => {
-                        // This delta can't fit into the packet, so we need to return this packet and then process another one.
+                        // Delta doesn't fit encoding; close out this packet and continue later.
                         break;
                     }
                 };
@@ -148,6 +161,7 @@ impl TccReceiver {
             );
             let last_seqnum = prev_seqnum;
             let status_count = (last_seqnum - first_seqnum + 1) as u16;
+            // Build a single status-vector chunk (2-bit symbols) with associated deltas.
             let pkt = TransportLayerCc {
                 sender_ssrc,
                 media_ssrc,
@@ -176,18 +190,22 @@ impl TccReceiver {
 pub struct RemoteInstant(Duration);
 
 impl RemoteInstant {
+    /// Construct from microseconds since the remote epoch.
     pub fn from_micros(micros: u64) -> Self {
         Self(Duration::from_micros(micros))
     }
 
+    /// Construct from milliseconds since the remote epoch.
     pub fn from_millis(millis: u64) -> Self {
         Self(Duration::from_millis(millis))
     }
 
+    /// Non-panicking difference; returns zero on underflow.
     pub fn saturating_duration_since(self, other: RemoteInstant) -> Duration {
         self.0.saturating_sub(other.0)
     }
 
+    /// Checked subtraction; returns `None` if it would underflow.
     pub fn checked_sub(self, offset: Duration) -> Option<RemoteInstant> {
         self.0.checked_sub(offset).map(RemoteInstant)
     }
@@ -209,12 +227,18 @@ impl AddAssign<Duration> for RemoteInstant {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ack {
+    /// Size of the acknowledged packet (payload+overhead as tracked by sender).
     pub size: DataSize,
+    /// Local send time for the packet.
     pub departure: Instant,
+    /// Remote arrival time reconstructed from feedback.
     pub arrival: RemoteInstant,
+    /// Local receipt time of the feedback report.
     pub feedback_arrival: Instant,
 }
 
+/// Sender-side Transport-CC helper that assigns sequence numbers, remembers
+/// sizes and departure times, and converts feedbacks into `Ack`s.
 pub struct TccSender {
     next_send_seqnum: u64,
     max_received_seqnum: u64,
@@ -225,6 +249,7 @@ pub struct TccSender {
 // feedback received.  It also updates outgoing packets to have a different
 // transport-cc seqnum.
 impl TccSender {
+    /// Create a sender with a two-generation cache (~10s TTL) for sent packet metadata.
     pub fn new(now: Instant) -> Self {
         Self {
             next_send_seqnum: 1,
@@ -238,17 +263,21 @@ impl TccSender {
         }
     }
 
+    /// Return current seqnum and increment for the next packet.
     pub fn increment_seqnum(&mut self) -> u64 {
         let seqnum = self.next_send_seqnum;
         self.next_send_seqnum += 1;
         seqnum
     }
 
+    /// Remember that a packet with `seqnum` and `size` was sent at `now`.
     pub fn remember_sent(&mut self, seqnum: u64, size: DataSize, now: Instant) {
         let departure = now;
         self.size_by_seqnum.insert(seqnum, (size, departure), now);
     }
 
+    /// Convert a received Transport-CC feedback into a list of `Ack`s by
+    /// matching arrivals to remembered sends and expiring matched entries.
     pub fn process_feedback(
         &mut self,
         feedback: &TransportLayerCc,
@@ -271,6 +300,7 @@ impl TccSender {
         acks
     }
 
+    /// Decode the feedback into full sequence numbers and remote arrival times.
     fn read_feedback(&mut self, cc: &TransportLayerCc) -> Vec<(u64, RemoteInstant)> {
         let chunks = cc.packet_chunks.iter().flat_map(|chunk| match chunk {
             PacketStatusChunk::RunLengthChunk(c) => {
@@ -359,16 +389,19 @@ impl TccSender {
 //     Some((feedback_seqnum, arrivals))
 // }
 
+/// Convert a `Duration` to tick units of the given microsecond resolution, rounding down.
 fn ticks_from_duration(duration: Duration, micros_per_tick: u16) -> u64 {
     // Round down.  If we round up the reference time, that will force the first
     // ack to be the 2-byte variety, which is less efficient to encode.
     (duration.as_micros() as u64) / (micros_per_tick as u64)
 }
 
+/// Convert ticks (at the given microsecond resolution) back to a `Duration`.
 fn duration_from_ticks(ticks: u64, micros_per_tick: u16) -> Duration {
     Duration::from_micros(ticks * micros_per_tick as u64)
 }
 
+/// Signed tick difference between two instants at the given resolution.
 fn ticks_from_before_and_after(
     before: Instant,
     after: Instant,
@@ -388,6 +421,8 @@ fn ticks_from_before_and_after(
     }
 }
 
+/// Expand a truncated counter (e.g., 16-bit seqnum) into a full-width counter
+/// using the last seen maximum and rollover/rollunder heuristics.
 pub fn expand_truncated_counter<Truncated>(
     truncated: Truncated,
     max: &mut u64,

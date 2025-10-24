@@ -1,3 +1,8 @@
+//! # DTLS Security Implementation
+//! 
+//! Datagram Transport Layer Security (DTLS) for secure WebRTC communication.
+//! Provides encryption and authentication for media streams over UDP.
+
 use crate::session::Certificate;
 use anyhow::{anyhow, Result};
 use openssl::{
@@ -13,11 +18,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender};
 
+/// DTLS stream for secure WebRTC communication
+/// Handles DTLS handshake, key exchange, and secure data transmission
 #[derive(Debug)]
 pub struct DtlsStream {
-    sender: Sender<Vec<u8>>,
-    receiver: Receiver<Vec<u8>>,
-    context: usize,
+    sender: Sender<Vec<u8>>,      // Outgoing encrypted data
+    receiver: Receiver<Vec<u8>>,  // Incoming encrypted data
+    context: usize,               // DTLS context pointer
 }
 
 impl Read for DtlsStream {
@@ -89,11 +96,14 @@ pub struct DtlsTransport {
     pub is_server: bool,
 }
 
+/// Verification callback – we accept anything here; DTLS peer auth is handled elsewhere.
 fn verify(_a: bool, _ctx: &mut X509StoreContextRef) -> bool {
     true
 }
 
 impl DtlsTransport {
+    /// Build a DTLS transport with the given certificate and role.
+    /// Sets SRTP profile, read-ahead/MTU, and initializes accept/connect state.
     pub fn new(
         cert: Certificate,
         is_server: bool,
@@ -130,6 +140,7 @@ impl DtlsTransport {
         ))
     }
 
+    /// After the handshake completes, export SRTP keying material (RFC 5764) for SRTP/SRTCP.
     pub async fn get_srtp_key(self) -> Result<[u8; 60]> {
         let mut buf = [0 as u8; 60];
         let ssl_stream = self.await?;
@@ -145,6 +156,7 @@ impl DtlsTransport {
 impl Future for DtlsTransport {
     type Output = Result<SslStream<DtlsStream>>;
 
+    /// Drive the DTLS handshake with OpenSSL, keeping mid-handshake state across polls.
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let result = if let Some(mut stream_builder) = self.stream_builder.take() {
             stream_builder.get_mut().context = ctx as *mut _ as usize;

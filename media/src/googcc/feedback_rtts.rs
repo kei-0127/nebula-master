@@ -7,6 +7,7 @@ use crate::{ring_buffer::RingBuffer, transportcc::Ack};
 
 const FEEDBACK_RTTS_HISTORY_LEN: usize = 32;
 
+/// Estimate mean feedback RTT from batches of ACK reports; emits a running average.
 pub fn estimate_feedback_rtts(
     ack_reports: impl Stream<Item = Vec<Ack>>,
 ) -> impl Stream<Item = Duration> {

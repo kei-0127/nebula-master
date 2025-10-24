@@ -1,3 +1,8 @@
+//! # Media Server Implementation
+//! 
+//! Main media server for real-time media processing and WebRTC connections.
+//! Central coordinator for all media-related operations.
+
 use crate::peer_connection::PeerConnectionEvent;
 use crate::stream::StreamSenderPoolMessage;
 use crate::transport::Transport;
@@ -24,35 +29,41 @@ use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tracing::info;
 use uuid::Uuid;
 
+// Global media service instance
 lazy_static! {
     pub static ref MEDIA_SERVICE: MediaService = MediaService::new().unwrap();
 }
 
+/// Error types for RPC server operations
 #[derive(Debug, Error)]
 pub enum RpcServerError {
     #[error("no redis host")]
-    NoRedisHost,
+    NoRedisHost,  // Redis host not configured
 
     #[error("no db host")]
-    NoDBHost,
+    NoDBHost,     // Database host not configured
 
     #[error("no ip")]
-    NoIP,
+    NoIP,         // IP address not available
 }
 
+/// Media server configuration
+/// Contains network settings, service endpoints, and processing parameters
 #[derive(Deserialize)]
 pub struct Config {
-    pub media_ip: Ipv4Addr,
-    pub redis: String,
-    pub db: String,
-    pub silent_threshold: usize,
-    pub media_host: String,
-    pub switchboard_host: String,
+    pub media_ip: Ipv4Addr,           // Media server IP address
+    pub redis: String,                 // Redis connection string
+    pub db: String,                    // Database connection string
+    pub silent_threshold: usize,       // Audio silence detection threshold
+    pub media_host: String,            // Media server hostname
+    pub switchboard_host: String,      // Switchboard server hostname
 }
 
+/// Main media service coordinator
+/// Coordinates WebRTC connections, media processing, RPC communication, and storage
 pub struct MediaService {
-    pub config: Config,
-    pub media_rpc_client: MediaRpcClient,
+    pub config: Config,                    // Server configuration
+    pub media_rpc_client: MediaRpcClient,  // RPC client for media operations
     pub switchboard_rpc_client: SwitchboardRpcClient,
     pub local_ip: String,
     pub storage_client: StorageClient,
@@ -64,6 +75,12 @@ pub struct Server {
 }
 
 impl MediaService {
+    /// Construct the global media service.
+    ///
+    /// Loads `Config` from disk, initializes RPC clients (media and switchboard),
+    /// resolves the local IP, opens the database handle, and creates a storage
+    /// client. This is used by runtime components across the process via
+    /// `MEDIA_SERVICE`.
     pub fn new() -> Result<MediaService> {
         let config = Config::new()?;
 
@@ -85,10 +102,17 @@ impl MediaService {
         })
     }
 
+    /// Process an incoming RPC destined for media.
+    ///
+    /// - If the method is `StopIce`, emits a `PeerConnectionEvent::Stop`.
+    /// - Otherwise, if `rpc_msg.id` parses as a `Uuid`, forwards the message to
+    ///   the `StreamSenderPool` so the per-stream sender can handle it.
+    /// - If the channel is closed or ID is invalid, returns `Ok(())` without error.
     pub async fn process_rpc(
         rpc_msg: RpcMessage,
         sender: &UnboundedSender<StreamSenderPoolMessage>,
     ) -> Result<()> {
+        // Handle ICE stop command
         if rpc_msg.method == RpcMethod::StopIce {
             let _ = PeerConnection::new_event(
                 &rpc_msg.id,
@@ -99,6 +123,7 @@ impl MediaService {
             return Ok(());
         }
 
+        // Forward RPC message to stream sender pool
         if let Ok(uuid) = Uuid::from_str(&rpc_msg.id) {
             if sender
                 .send(StreamSenderPoolMessage::Rpc(uuid, rpc_msg))
@@ -112,19 +137,29 @@ impl MediaService {
 }
 
 impl Config {
+    /// Load media configuration from `/etc/nebula/nebula.conf`.
     pub fn new() -> Result<Config> {
+        // Read configuration from file
         let contents = fs::read_to_string("/etc/nebula/nebula.conf")?;
         Ok(toml::from_str(&contents)?)
     }
 }
 
 impl Server {
+    /// Create a new media server instance and initialize transport.
     pub async fn new() -> Result<Server, Error> {
+        // Initialize transport layer
         let transport = Transport::new().await?;
 
         Ok(Server { transport })
     }
 
+    /// Start the HTTP control endpoints and run the transport loop.
+    ///
+    /// Spawns an Axum server exposing `/health-check` and
+    /// `/internal/stream` (for internal RPC forwarding), then runs the
+    /// underlying `Transport` which handles UDP sockets and the stream sender
+    /// pool.
     pub async fn run(&mut self) {
         info!("media server run");
         async fn health_check() -> &'static str {
