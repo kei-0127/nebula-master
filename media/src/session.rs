@@ -21,6 +21,7 @@
 // 
 
 use super::server::MEDIA_SERVICE;
+use crate::packet_pool::{PacketPool, PooledPacket};
 use crate::socket::RawSocket;
 use crate::stream::{
     MediaStreamReceiver, StreamReceiverMessage, StreamSenderPoolMessage,
@@ -29,7 +30,6 @@ use anyhow::Result;
 use nebula_redis::DistributedMutex;
 use nebula_redis::REDIS;
 use nebula_utils::uuid_v5;
-use bytes::Bytes;
 use openssl::{
     asn1::Asn1Time,
     bn::{BigNum, MsbOption},
@@ -131,7 +131,7 @@ pub enum SessionPoolMessage {
         port: u16,
         peer_ip: Ipv4Addr,
         peer_port: u16,
-        packet: Bytes,
+        packet: PooledPacket,
         now: Instant,
     },
     Stop(String),
@@ -172,14 +172,15 @@ impl NewSessionPool {
         .await
         .unwrap();
 
-        let mut buf = [0; 5000];
         loop {
+            let mut buffer = PacketPool::acquire(5000);
+            buffer.ensure_len(5000);
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {
                     rx.close();
                     return;
                 }
-                result = udp_socket.recv_from(&mut buf) => {
+                result = udp_socket.recv_from(&mut buffer.as_mut_slice()[..5000]) => {
                     match result {
                         Ok((n, addr)) => {
                             let peer_ip = match addr.ip() {
@@ -187,11 +188,12 @@ impl NewSessionPool {
                                 std::net::IpAddr::V6(_) => continue,
                             };
                             let peer_port = addr.port();
+                            let packet = buffer.into_packet_with_len(n);
                             let _ = session_pool_sender.send(SessionPoolMessage::Packet {
                                 port,
                                 peer_ip,
                                 peer_port,
-                                packet: Bytes::copy_from_slice(&buf[..n]),
+                                packet,
                                 now: Instant::now(),
                             });
                         }

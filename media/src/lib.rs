@@ -78,6 +78,7 @@ pub mod key_sorted_cache;
 pub mod math;
 pub mod nack;
 pub mod packet;
+pub mod packet_pool;
 pub mod peer_connection;
 pub mod resampler;
 pub mod ring_buffer;

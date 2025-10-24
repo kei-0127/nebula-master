@@ -219,8 +219,8 @@ impl RtpPacket {
     }
 
     // Wrap an existing RTP buffer from Bytes (copy into BytesMut)
-    pub fn from_bytes(buf: Bytes) -> Self {
-        Self { inner: BytesMut::from(&buf[..]) }
+    pub fn from_bytes(buf: impl AsRef<[u8]>) -> Self {
+        Self { inner: BytesMut::from(buf.as_ref()) }
     }
 
     // Read SSRC from this RTP packet
@@ -553,6 +553,11 @@ impl RtpPacket {
     // Borrow all bytes of this RTP packet
     pub fn data(&self) -> &[u8] {
         &self.inner[..]
+    }
+
+    // Clone the underlying buffer into a read-only `Bytes` without copying.
+    pub fn as_bytes(&self) -> Bytes {
+        self.inner.clone().freeze()
     }
 
     // Mutably borrow the underlying buffer for this RTP packet

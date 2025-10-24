@@ -25,7 +25,6 @@ use stun_codec::{
     rfc5389::{attributes, methods, Attribute},
     MessageClass, MessageDecoder, MessageEncoder,
 };
-use bytes::Bytes;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     Mutex,
@@ -36,6 +35,7 @@ use webrtc_util::Unmarshal;
 
 use crate::{
     dtls::DtlsTransport,
+    packet_pool::{PacketPool, PooledPacket},
     packet::RtpPacket,
     rtcp::RtcpPacket,
     server::MEDIA_SERVICE,
@@ -62,19 +62,19 @@ pub enum PeerConnectionEvent {
 
 #[derive(Clone, Debug)]
 pub enum PeerConnectionPoolMessage {
-    Packet(SocketAddr, Bytes, Instant),
+    Packet(SocketAddr, PooledPacket, Instant),
     Stop(SocketAddr),
 }
 
 #[derive(Clone, Debug)]
 pub enum PeerConnectionMessage {
-    Packet(Bytes, Instant),
+    Packet(PooledPacket, Instant),
     Event(PeerConnectionEvent),
 }
 
 #[derive(Clone, Debug)]
 pub enum PeerConnectionTrackMessage {
-    Packet(Bytes, Instant),
+    Packet(PooledPacket, Instant),
 }
 
 pub struct PeerConnectionPool {
@@ -112,16 +112,18 @@ impl PeerConnectionPool {
 
         // UDP ingress -> queue as PoolMessage::Packet(addr, bytes, now)
         tokio::spawn(async move {
-            let mut buf = vec![0; 9000];
             loop {
-                if let Ok((n, addr)) = udp_socket.recv_from(&mut buf).await {
-                    let _ = local_pool_sender.send(
-                        PeerConnectionPoolMessage::Packet(
-                            addr,
-                            Bytes::copy_from_slice(&buf[..n]),
-                            Instant::now(),
-                        ),
-                    );
+                let mut buffer = PacketPool::acquire(9000);
+                buffer.ensure_len(9000);
+                if let Ok((n, addr)) =
+                    udp_socket.recv_from(&mut buffer.as_mut_slice()[..9000]).await
+                {
+                    let packet = buffer.into_packet_with_len(n);
+                    let _ = local_pool_sender.send(PeerConnectionPoolMessage::Packet(
+                        addr,
+                        packet,
+                        Instant::now(),
+                    ));
                 }
             }
         });
@@ -285,7 +287,7 @@ impl PeerConnection {
     // Initialize a per-peer connection
     // If no cached channel exists, treat the first packet as STUN and resolve the channel via USERNAME
     async fn new(
-        first_packet: Bytes,
+        first_packet: PooledPacket,
         udp: Arc<UdpSocket>,
         peer_addr: SocketAddr,
         stream_sender_pool: UnboundedSender<StreamSenderPoolMessage>,
@@ -294,7 +296,7 @@ impl PeerConnection {
             webrtc
         } else {
             let stun_msg = MessageDecoder::<Attribute>::new()
-                .decode_from_bytes(&first_packet)?
+                .decode_from_bytes(first_packet.as_ref())?
                 .map_err(|e| anyhow!("{:?}", e))?;
             if stun_msg.class() != MessageClass::Request {
                 return Err(anyhow!("not stun request"))?;
@@ -326,7 +328,7 @@ impl PeerConnection {
 
     // Per-peer task: handles DTLS, STUN and forwards RTP/RTCP to stream receivers
     async fn process_packets(
-        first_packet: Bytes,
+        first_packet: PooledPacket,
         udp_socket: Arc<UdpSocket>,
         peer_addr: SocketAddr,
         sender: UnboundedSender<PeerConnectionMessage>,
@@ -395,10 +397,14 @@ impl PeerConnection {
     }
 
     // Classify and route a single UDP packet (STUN, DTLS or RTP/RTCP)
-    async fn receive_packet(&mut self, packet: Bytes, now: Instant) -> Result<()> {
+    async fn receive_packet(
+        &mut self,
+        packet: PooledPacket,
+        now: Instant,
+    ) -> Result<()> {
         if is_stun_packet(&packet) {
             let stun_msg = MessageDecoder::<Attribute>::new()
-                .decode_from_bytes(&packet)?
+                .decode_from_bytes(packet.as_ref())?
                 .map_err(|e| anyhow!("{:?}", e))?;
             self.handle_stun(&stun_msg).await?;
             return Ok(());
